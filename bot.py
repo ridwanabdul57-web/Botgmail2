@@ -1115,7 +1115,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
 
         # =========================================================================
-        # PERBAIKAN: Mengirim file .txt kumulatif akun pending user ke admin
+        # FITUR BARU: Mengirim file .txt dengan nama file sesuai nama user pengirim
         # =========================================================================
         if inserted_count > 0:
             username_txt = f"@{user.username}" if user.username else "No Username"
@@ -1143,8 +1143,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt_content = "\n".join([f"{g}:{p}" for g, p in all_pending_user_accounts])
             txt_file = io.BytesIO(txt_content.encode('utf-8'))
             
+            # Sanitasi nama user agar aman dijadikan karakter nama file
+            safe_first_name = re.sub(r'[\s\\/*?:"<>|]+', '_', user.first_name).strip('_')
+            if not safe_first_name:
+                safe_first_name = str(user.id)
+                
             timestamp_file = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"setoran_{user.id}_{timestamp_file}.txt"
+            filename = f"{safe_first_name}_{user.id}_{timestamp_file}.txt"
 
             try:
                 await context.bot.send_document(
@@ -1218,4 +1223,3 @@ if __name__ == '__main__':
 
     print("Bot Setoran V28 Aktif (PostgreSQL Mode)...")
     app.run_polling()
-
