@@ -372,11 +372,62 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("⚙️ Kelola Setoran Gmail Pending", callback_data="admin_setoran")],
             [InlineKeyboardButton("💸 Kelola Withdraw Pending", callback_data="admin_withdraw")],
+            [InlineKeyboardButton("📂 Riwayat Setoran Semua User (.txt)", callback_data="admin_export_all_deposits")],
             [InlineKeyboardButton("« Kembali ke Menu Utama", callback_data="menu_utama")]
         ]
 
         pesan = "⚙️ *PANEL ADMIN*\n═══════════════════════\nSilakan pilih menu pengelola di bawah ini:"
         await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data == "admin_export_all_deposits":
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT d.user_id, u.username, d.gmail, d.password, d.status, d.created_at 
+            FROM deposits d 
+            LEFT JOIN users u ON d.user_id = u.user_id 
+            ORDER BY d.id DESC
+        ''')
+        all_deposits = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not all_deposits:
+            await query.answer("⚠️ Belum ada riwayat setoran sama sekali di database.", show_alert=True)
+            return
+
+        # Buat isi teks file .txt
+        txt_lines = [
+            "==================================================",
+            f"REKAP RIWAYAT SETORAN SEMUA USER - {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}",
+            "==================================================",
+            "FORMAT: [User ID] | [Username] | [Gmail:Password] | [Status] | [Waktu]",
+            ""
+        ]
+
+        for uid, uname, gmail, pwd, status, dt in all_deposits:
+            u_tag = f"@{uname}" if uname else "NoUsername"
+            txt_lines.append(f"ID: {uid} | {u_tag} | {gmail}:{pwd} | Status: {status} | Waktu: {dt}")
+
+        txt_content = "\n".join(txt_lines)
+        txt_file = io.BytesIO(txt_content.encode('utf-8'))
+        filename = f"semua_riwayat_setoran_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
+        try:
+            await context.bot.send_document(
+                chat_id=user.id,
+                document=txt_file,
+                filename=filename,
+                caption=f"📁 *REKAP RIWAYAT SEMUA SETORAN USER*\nTotal data: `{len(all_deposits)}` akun.",
+                parse_mode='Markdown'
+            )
+            await query.answer("✅ File riwayat semua user berhasil dikirim!", show_alert=False)
+        except Exception as e:
+            await query.answer(f"❌ Gagal mengirim file: {e}", show_alert=True)
 
     elif data == "admin_setoran":
         if user.id != ADMIN_CHAT_ID:
@@ -1114,14 +1165,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         context.user_data.clear()
 
-        # =========================================================================
-        # FITUR BARU: Mengirim file .txt dengan nama file sesuai nama user pengirim
-        # =========================================================================
         if inserted_count > 0:
             username_txt = f"@{user.username}" if user.username else "No Username"
             mode_label = "BULKING" if is_bulking_mode else "SATUAN"
             
-            # Ambil seluruh akun pending milik user ini untuk dikompilasi ke dalam file txt personal kumulatif
             conn = get_db()
             cursor = conn.cursor()
             cursor.execute("SELECT gmail, password FROM deposits WHERE user_id = %s AND status = 'PENDING'", (user.id,))
@@ -1143,13 +1190,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt_content = "\n".join([f"{g}:{p}" for g, p in all_pending_user_accounts])
             txt_file = io.BytesIO(txt_content.encode('utf-8'))
             
-            # Sanitasi nama user agar aman dijadikan karakter nama file
-            safe_first_name = re.sub(r'[\s\\/*?:"<>|]+', '_', user.first_name).strip('_')
-            if not safe_first_name:
-                safe_first_name = str(user.id)
-                
             timestamp_file = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{safe_first_name}_{user.id}_{timestamp_file}.txt"
+            filename = f"setoran_{user.id}_{timestamp_file}.txt"
 
             try:
                 await context.bot.send_document(
@@ -1208,7 +1250,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def post_init(application):
-    # Inisialisasi tabel database saat bot baru di-start secara aman
     init_db()
     await application.bot.set_my_commands([
         BotCommand("start", "🔄 Tampilkan Menu Utama / Refresh Bot")
