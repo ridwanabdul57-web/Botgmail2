@@ -2,7 +2,7 @@ import io
 import os
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import psycopg2
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -12,6 +12,11 @@ ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', 8359903974))
 CS_USERNAME = 'bossgmailbotcs'
 HARGA_PER_GMAIL = 4000
 MAX_BULK_LIMIT = 50
+
+# Helper untuk mendapatkan waktu WIB yang akurat
+def get_wib_time():
+    wib_timezone = timezone(timedelta(hours=7))
+    return datetime.now(wib_timezone).strftime("%d-%m-%Y %H:%M:%S WIB")
 
 # Master daftar semua sandi yang dikelola bot beserta status default-nya (termasuk selaras9)
 DEFAULT_MASTER_PASSWORDS = {
@@ -131,7 +136,6 @@ def set_password_status(password: str, status: str):
 
 def get_current_allowed_passwords():
     statuses = get_all_password_statuses()
-    # Hanya ambil password yang statusnya 'ACTIVE'
     return [pwd for pwd, st in statuses.items() if st == 'ACTIVE']
 
 # ----------------- KEYBOARD MENUS -----------------
@@ -264,7 +268,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chosen_password = data.split('_')[1]
         allowed_pwds = get_current_allowed_passwords()
         
-        # Validasi keamanan jika password yang dipilih tiba-tiba dinonaktifkan
         if chosen_password not in allowed_pwds:
             await query.answer(f"❌ Sandi `{chosen_password}` sedang dinonaktifkan oleh Admin!", show_alert=True)
             return
@@ -488,9 +491,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠️ Belum ada riwayat setoran sama sekali di database.", show_alert=True)
             return
 
+        wib_now_date = datetime.now(timezone(timedelta(hours=7))).strftime('%Y%m%d_%H%M%S')
         grouped_data = {}
         for uid, uname, gmail, pwd, status, dt in all_deposits:
-            tanggal_str = dt.split()[0] if dt and len(dt.split()) > 0 else datetime.now().strftime('%d-%m-%Y')
+            tanggal_str = dt.split()[0] if dt and len(dt.split()) > 0 else datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
             
             if tanggal_str not in grouped_data:
                 grouped_data[tanggal_str] = {}
@@ -526,14 +530,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         txt_content = "\n".join(txt_lines)
         txt_file = io.BytesIO(txt_content.encode('utf-8'))
-        filename = f"rekap_realtime_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        filename = f"rekap_realtime_{wib_now_date}.txt"
 
         try:
             await context.bot.send_document(
                 chat_id=user.id,
                 document=txt_file,
                 filename=filename,
-                caption=f"📁 *REKAP FORMAT BARU (REAL-TIME)*\nBerhasil memperbarui status Approved/Pending secara akurat.",
+                caption=f"📁 *REKAP FORMAT BARU (REAL-TIME WIB)*\nBerhasil memperbarui status Approved/Pending secara akurat.",
                 parse_mode='Markdown'
             )
             await query.answer("✅ File rekap real-time berhasil dikirim!", show_alert=False)
@@ -930,7 +934,6 @@ async def render_admin_panel(query):
     statuses = get_all_password_statuses()
     keyboard = []
 
-    # Buat tombol toggle dinamis untuk setiap password
     for pwd, st in statuses.items():
         st_icon = "🟢 AKTIF" if st == 'ACTIVE' else "🔴 NONAKTIF"
         keyboard.append([InlineKeyboardButton(f"🔑 Sandi [{pwd}]: {st_icon}", callback_data=f"admin_toggle_pwd_{pwd}")])
@@ -1033,7 +1036,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif st == "REJECTED":
                     status_icon = "❌ REJECTED"
                 
-                waktu = dt if dt else datetime.now().strftime("%d-%m-%Y %H:%M:%S WIB")
+                waktu = dt if dt else get_wib_time()
                 pesan += f"📧 `{g_mail}`\n└ Status: *{status_icon}*\n└ Waktu: `{waktu}`\n\n"
 
         await update.message.reply_text(pesan, reply_markup=back_keyboard(), parse_mode='Markdown')
@@ -1188,7 +1191,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             return
 
-        now_str = datetime.now().strftime("%d-%m-%Y %H:%M:%S WIB")
+        now_str = get_wib_time()
         cursor.execute('UPDATE users SET balance = balance - %s WHERE user_id = %s', (nominal, user.id))
         cursor.execute('INSERT INTO withdrawals (user_id, nominal, metode, rekening, atas_nama, created_at) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id', 
                        (user.id, nominal, metode, rekening, atas_nama, now_str))
@@ -1251,7 +1254,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     allowed_pwds = get_current_allowed_passwords()
 
-    # Validasi sandi aktif untuk mode bulking
     if is_bulking_mode and bulk_password_used not in allowed_pwds:
         await update.message.reply_text(f"❌ Sandi `{bulk_password_used}` sedang dinonaktifkan oleh Admin!", reply_markup=main_menu_keyboard(user.id))
         context.user_data.clear()
@@ -1264,7 +1266,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if match:
                 g_mail = match.group(1).lower()
                 g_pass = match.group(2).strip()
-                # Hanya terima jika password tersebut aktif di sistem saat ini
                 if g_pass in allowed_pwds:
                     items_to_process.append((g_mail, g_pass))
 
@@ -1299,7 +1300,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 duplicate_count += 1
                 continue
 
-            now_str = datetime.now().strftime("%d-%m-%Y %H:%M:%S WIB")
+            now_str = get_wib_time()
 
             cursor.execute('INSERT INTO deposits (user_id, gmail, password, created_at) VALUES (%s, %s, %s, %s)', (user.id, gmail, password, now_str))
             conn.commit()
@@ -1324,7 +1325,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'PENDING']
             approved_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'APPROVED']
             
-            tgl_hari_ini = datetime.now().strftime('%d-%m-%Y')
+            tgl_hari_ini = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
 
             txt_lines = [
                 f"{tgl_hari_ini}",
@@ -1346,7 +1347,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt_content = "\n".join(txt_lines)
             txt_file = io.BytesIO(txt_content.encode('utf-8'))
             
-            timestamp_file = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp_file = datetime.now(timezone(timedelta(hours=7))).strftime("%Y%m%d_%H%M%S")
             filename = f"setoran_{user.id}_{timestamp_file}.txt"
 
             laporan_admin_text = (
@@ -1355,7 +1356,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👤 *User:* {user.first_name} ({username_txt})\n"
                 f"📦 *Akun Baru Masuk:* `{inserted_count}` Akun\n"
                 f"═══════════════════════\n"
-                f"📄 *File .txt di atas sudah menggunakan format baru & real-time status.*"
+                f"📄 *File .txt di atas sudah menggunakan format baru & real-time WIB.*"
             )
 
             try:
@@ -1428,5 +1429,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_message))
 
-    print("Bot Setoran V29 Aktif (Multi-Password Toggle Panel)...")
+    print("Bot Setoran V29 Aktif (Real-time WIB Timezone Fixed)...")
     app.run_polling()
