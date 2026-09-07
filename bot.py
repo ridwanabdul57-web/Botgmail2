@@ -13,7 +13,13 @@ CS_USERNAME = 'bossgmailbotcs'
 HARGA_PER_GMAIL = 4000
 MAX_BULK_LIMIT = 50
 
-ALLOWED_BULK_PASSWORDS = ['fineirga', 'sgsg1122', 'prabujaya']
+# Master daftar semua sandi yang dikelola bot beserta status default-nya (termasuk selaras9)
+DEFAULT_MASTER_PASSWORDS = {
+    'fineirga': 'ACTIVE',
+    'sgsg1122': 'ACTIVE',
+    'prabujaya': 'ACTIVE',
+    'selaras9': 'ACTIVE'
+}
 
 REJECT_REASONS = [
     "Password Salah / Tidak Sesuai Rules",
@@ -69,12 +75,64 @@ def init_db():
         )
     ''')
 
+    # Tabel pengaturan bot untuk status sandi secara dinamis
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+
+    # Masukkan data default jika belum ada di database
+    for pwd, default_status in DEFAULT_MASTER_PASSWORDS.items():
+        setting_key = f"pwd_status_{pwd}"
+        cursor.execute('''
+            INSERT INTO bot_settings (key, value) 
+            VALUES (%s, %s) 
+            ON CONFLICT (key) DO NOTHING
+        ''', (setting_key, default_status))
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dep_user ON deposits(user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wd_user ON withdrawals(user_id)")
         
     conn.commit()
     cursor.close()
     conn.close()
+
+def get_all_password_statuses():
+    statuses = {}
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM bot_settings WHERE key LIKE 'pwd_status_%'")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        db_data = {r[0].replace('pwd_status_', ''): r[1] for r in rows}
+        for pwd in DEFAULT_MASTER_PASSWORDS.keys():
+            statuses[pwd] = db_data.get(pwd, DEFAULT_MASTER_PASSWORDS[pwd])
+    except Exception:
+        for pwd, st in DEFAULT_MASTER_PASSWORDS.items():
+            statuses[pwd] = st
+    return statuses
+
+def set_password_status(password: str, status: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    setting_key = f"pwd_status_{password}"
+    cursor.execute(
+        "INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", 
+        (setting_key, status)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def get_current_allowed_passwords():
+    statuses = get_all_password_statuses()
+    # Hanya ambil password yang statusnya 'ACTIVE'
+    return [pwd for pwd, st in statuses.items() if st == 'ACTIVE']
 
 # ----------------- KEYBOARD MENUS -----------------
 def persistent_reply_keyboard():
@@ -114,15 +172,21 @@ def back_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Menu Utama", callback_data="menu_utama")]])
 
 def get_welcome_text(first_name):
+    allowed_pwds = get_current_allowed_passwords()
+    if allowed_pwds:
+        pwd_str = ", ".join([f"`{p}`" for p in allowed_pwds])
+    else:
+        pwd_str = "_Tidak ada sandi yang aktif saat ini_"
+
     return (
-        f"✨ *SELAMAT DATANG DI BOT SETORAN GMAIL V28* ✨\n"
+        f"✨ *SELAMAT DATANG DI BOT SETORAN GMAIL V29* ✨\n"
         f"Halo *{first_name}*! Silakan baca informasi & aturan setoran di bawah ini:\n\n"
         f"💵 *INFORMASI RATE & PROSES*\n"
         f"• *Rate Per Akun:* Rp 4.000\n"
         f"• *Estimasi Pengecekan:* 24 - 48 Jam Kerja\n"
         f"• *Batas Bulking:* Maksimal {MAX_BULK_LIMIT} akun / setor\n\n"
-        f"🔑 *ATURAN KATA SANDI (PASSWORD)*\n"
-        f"• Password yang valid: `fineirga`, `sgsg1122`, atau `prabujaya`\n\n"
+        f"🔑 *ATURAN KATA SANDI (PASSWORD AKTIF)*\n"
+        f"• Password yang valid hari ini: {pwd_str}\n\n"
         f"⚠️ *SYARAT & KETENTUAN WAJIB*\n"
         f"1. *Dilarang Double-Sell:* Jangan pernah menjual kembali atau mengganti kata sandi akun selama proses verifikasi.\n"
         f"2. *Nomor HP Pemulihan:* Wajib dikosongkan / jangan diverifikasi.\n"
@@ -160,34 +224,51 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(get_welcome_text(user.first_name), reply_markup=main_menu_keyboard(user.id), parse_mode='Markdown')
 
     elif data == "menu_satuan":
+        allowed_pwds = get_current_allowed_passwords()
+        if not allowed_pwds:
+            await query.answer("❌ Mohon maaf, saat ini tidak ada sandi yang diaktifkan oleh admin.", show_alert=True)
+            return
+
         context.user_data['mode'] = 'SATUAN'
+        pwd_example = " / ".join(allowed_pwds)
         pesan = (
             "⏳ *MODE SETORAN SATUAN AKTIF*\n"
             "═══════════════════════\n"
             "Silakan ketik, kirim data Gmail kamu, atau kirim file `.txt` sekarang.\n\n"
             "📌 *Format:* `email@gmail.com:password`\n"
-            "💡 *Password Wajib:* `fineirga` / `sgsg1122` / `prabujaya`\n"
-            "💡 *Contoh:* `ridwan123@gmail.com:fineirga`\n\n"
+            f"💡 *Password Aktif:* {pwd_example}\n"
+            f"💡 *Contoh:* `ridwan123@gmail.com:{allowed_pwds[0]}`\n\n"
             "_Sistem sedang menunggu inputan kamu..._"
         )
         await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
 
     elif data == "menu_bulking":
-        keyboard = [
-            [InlineKeyboardButton("🔑 fineirga", callback_data="bulkpwd_fineirga")],
-            [InlineKeyboardButton("🔑 sgsg1122", callback_data="bulkpwd_sgsg1122")],
-            [InlineKeyboardButton("🔑 prabujaya", callback_data="bulkpwd_prabujaya")],
-            [InlineKeyboardButton("« Batal / Kembali", callback_data="menu_utama")]
-        ]
+        allowed_pwds = get_current_allowed_passwords()
+        if not allowed_pwds:
+            await query.answer("❌ Mohon maaf, saat ini tidak ada sandi yang diaktifkan oleh admin.", show_alert=True)
+            return
+
+        keyboard = []
+        for p in allowed_pwds:
+            keyboard.append([InlineKeyboardButton(f"🔑 {p}", callback_data=f"bulkpwd_{p}")])
+        keyboard.append([InlineKeyboardButton("« Batal / Kembali", callback_data="menu_utama")])
+        
         pesan = (
             "📦 *SETORAN BULKING - PILIH PASSWORD*\n"
             "═══════════════════════\n"
-            "Silakan pilih kata sandi yang digunakan untuk kelompok akun yang ingin kamu setor:"
+            "Silakan pilih kata sandi aktif yang digunakan untuk kelompok akun yang ingin kamu setor:"
         )
         await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     elif data.startswith("bulkpwd_"):
         chosen_password = data.split('_')[1]
+        allowed_pwds = get_current_allowed_passwords()
+        
+        # Validasi keamanan jika password yang dipilih tiba-tiba dinonaktifkan
+        if chosen_password not in allowed_pwds:
+            await query.answer(f"❌ Sandi `{chosen_password}` sedang dinonaktifkan oleh Admin!", show_alert=True)
+            return
+
         context.user_data['mode'] = 'BULKING_INPUT_EMAILS'
         context.user_data['bulk_password'] = chosen_password
 
@@ -369,15 +450,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Akses khusus Admin!", show_alert=True)
             return
 
-        keyboard = [
-            [InlineKeyboardButton("⚙️ Kelola Setoran Gmail Pending", callback_data="admin_setoran")],
-            [InlineKeyboardButton("💸 Kelola Withdraw Pending", callback_data="admin_withdraw")],
-            [InlineKeyboardButton("📂 Riwayat Setoran Semua User (.txt)", callback_data="admin_export_all_deposits")],
-            [InlineKeyboardButton("« Kembali ke Menu Utama", callback_data="menu_utama")]
-        ]
+        await render_admin_panel(query)
 
-        pesan = "⚙️ *PANEL ADMIN*\n═══════════════════════\nSilakan pilih menu pengelola di bawah ini:"
-        await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    elif data.startswith("admin_toggle_pwd_"):
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        target_pwd = data.replace('admin_toggle_pwd_', '')
+        statuses = get_all_password_statuses()
+        
+        if target_pwd in statuses:
+            new_st = 'INACTIVE' if statuses[target_pwd] == 'ACTIVE' else 'ACTIVE'
+            set_password_status(target_pwd, new_st)
+            await query.answer(f"✅ Sandi `{target_pwd}` diubah menjadi {new_st}!", show_alert=True)
+
+        await render_admin_panel(query)
 
     elif data == "admin_export_all_deposits":
         if user.id != ADMIN_CHAT_ID:
@@ -400,9 +488,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠️ Belum ada riwayat setoran sama sekali di database.", show_alert=True)
             return
 
-        # Mengelompokkan data berdasarkan Tanggal dan User secara real-time
         grouped_data = {}
-
         for uid, uname, gmail, pwd, status, dt in all_deposits:
             tanggal_str = dt.split()[0] if dt and len(dt.split()) > 0 else datetime.now().strftime('%d-%m-%Y')
             
@@ -416,24 +502,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if status in grouped_data[tanggal_str][user_key]:
                 grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd}")
 
-        # Menyusun format teks sesuai permintaan baru
         txt_lines = []
         for tanggal, users_dict in grouped_data.items():
             txt_lines.append(f"{tanggal}")
-            for (uid, uname), statuses in users_dict.items():
+            for (uid, uname), statuses_dict in users_dict.items():
                 u_tag = f"@{uname}" if uname else f"User_{uid}"
                 txt_lines.append(u_tag)
                 
                 txt_lines.append("Gmail pending :")
-                if statuses['PENDING']:
-                    txt_lines.extend(statuses['PENDING'])
+                if statuses_dict['PENDING']:
+                    txt_lines.extend(statuses_dict['PENDING'])
                 else:
                     txt_lines.append("-")
                 
                 txt_lines.append("") 
                 txt_lines.append("Gmail approved")
-                if statuses['APPROVED']:
-                    txt_lines.extend(statuses['APPROVED'])
+                if statuses_dict['APPROVED']:
+                    txt_lines.extend(statuses_dict['APPROVED'])
                 else:
                     txt_lines.append("-")
                 
@@ -841,6 +926,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+async def render_admin_panel(query):
+    statuses = get_all_password_statuses()
+    keyboard = []
+
+    # Buat tombol toggle dinamis untuk setiap password
+    for pwd, st in statuses.items():
+        st_icon = "🟢 AKTIF" if st == 'ACTIVE' else "🔴 NONAKTIF"
+        keyboard.append([InlineKeyboardButton(f"🔑 Sandi [{pwd}]: {st_icon}", callback_data=f"admin_toggle_pwd_{pwd}")])
+
+    keyboard.extend([
+        [InlineKeyboardButton("⚙️ Kelola Setoran Gmail Pending", callback_data="admin_setoran")],
+        [InlineKeyboardButton("💸 Kelola Withdraw Pending", callback_data="admin_withdraw")],
+        [InlineKeyboardButton("📂 Riwayat Setoran Semua User (.txt)", callback_data="admin_export_all_deposits")],
+        [InlineKeyboardButton("« Kembali ke Menu Utama", callback_data="menu_utama")]
+    ])
+
+    pesan = (
+        "⚙️ *PANEL ADMIN - PENGATURAN SANDI & LAYANAN*\n"
+        "═══════════════════════\n"
+        "Klik tombol sandi di bawah untuk mengaktifkan atau menonaktifkannya secara instan:"
+    )
+    await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
 async def render_admin_user_deposits(query, target_uid, context):
     conn = get_db()
     cursor = conn.cursor()
@@ -1141,12 +1249,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_bulking_mode = (current_mode == 'BULKING_INPUT_EMAILS')
     bulk_password_used = context.user_data.get('bulk_password') if is_bulking_mode else None
 
+    allowed_pwds = get_current_allowed_passwords()
+
+    # Validasi sandi aktif untuk mode bulking
+    if is_bulking_mode and bulk_password_used not in allowed_pwds:
+        await update.message.reply_text(f"❌ Sandi `{bulk_password_used}` sedang dinonaktifkan oleh Admin!", reply_markup=main_menu_keyboard(user.id))
+        context.user_data.clear()
+        return
+
     if current_mode == 'SATUAN':
         satuan_pattern = r'([a-zA-Z0-9._%+-]+@gmail\.com)\s*:\s*(.+)'
         for line in lines:
             match = re.match(satuan_pattern, line, re.IGNORECASE)
             if match:
-                items_to_process.append((match.group(1).lower(), match.group(2)))
+                g_mail = match.group(1).lower()
+                g_pass = match.group(2).strip()
+                # Hanya terima jika password tersebut aktif di sistem saat ini
+                if g_pass in allowed_pwds:
+                    items_to_process.append((g_mail, g_pass))
 
     elif is_bulking_mode:
         for line in lines:
@@ -1194,7 +1314,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username_txt = f"@{user.username}" if user.username else f"User_{user.id}"
             mode_label = "BULKING" if is_bulking_mode else "SATUAN"
             
-            # Mengambil seluruh data akun user ini dari database secara real-time untuk file .txt baru
             conn = get_db()
             cursor = conn.cursor()
             cursor.execute("SELECT gmail, password, status, created_at FROM deposits WHERE user_id = %s", (user.id,))
@@ -1282,9 +1401,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
     else:
+        allowed_str = ", ".join(allowed_pwds) if allowed_pwds else "Tidak ada"
         error_msg = (
-            f"❌ *FORMAT LIST / AKUN TIDAK VALID!*\n\n"
-            f"⚠️ Pastikan format list gmail Anda benar (`email@gmail.com`).\n\n"
+            f"❌ *FORMAT LIST / SANDI TIDAK VALID!*\n\n"
+            f"⚠️ Pastikan sandi yang digunakan sesuai dengan daftar sandi yang **aktif** hari ini: `{allowed_str}`.\n\n"
             f"🌐 Silakan cek terlebih dahulu di web *netnit.net*:\n"
             f"1. Masuk dan lakukan **Quick Fix Issue** pada akun Anda.\n"
             f"2. Pastikan status akun di sana sudah **Wajib GOOD semua** sebelum disetor ulang ke bot ini!"
@@ -1308,5 +1428,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_message))
 
-    print("Bot Setoran V28 Aktif (PostgreSQL Mode)...")
+    print("Bot Setoran V29 Aktif (Multi-Password Toggle Panel)...")
     app.run_polling()
