@@ -390,7 +390,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SELECT d.user_id, u.username, d.gmail, d.password, d.status, d.created_at 
             FROM deposits d 
             LEFT JOIN users u ON d.user_id = u.user_id 
-            ORDER BY d.id DESC
+            ORDER BY d.created_at DESC, d.user_id DESC
         ''')
         all_deposits = cursor.fetchall()
         cursor.close()
@@ -400,32 +400,58 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠️ Belum ada riwayat setoran sama sekali di database.", show_alert=True)
             return
 
-        # Buat isi teks file .txt
-        txt_lines = [
-            "==================================================",
-            f"REKAP RIWAYAT SETORAN SEMUA USER - {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}",
-            "==================================================",
-            "FORMAT: [User ID] | [Username] | [Gmail:Password] | [Status] | [Waktu]",
-            ""
-        ]
+        # Mengelompokkan data berdasarkan Tanggal dan User secara real-time
+        grouped_data = {}
 
         for uid, uname, gmail, pwd, status, dt in all_deposits:
-            u_tag = f"@{uname}" if uname else "NoUsername"
-            txt_lines.append(f"ID: {uid} | {u_tag} | {gmail}:{pwd} | Status: {status} | Waktu: {dt}")
+            tanggal_str = dt.split()[0] if dt and len(dt.split()) > 0 else datetime.now().strftime('%d-%m-%Y')
+            
+            if tanggal_str not in grouped_data:
+                grouped_data[tanggal_str] = {}
+            
+            user_key = (uid, uname)
+            if user_key not in grouped_data[tanggal_str]:
+                grouped_data[tanggal_str][user_key] = {'PENDING': [], 'APPROVED': [], 'REJECTED': []}
+            
+            if status in grouped_data[tanggal_str][user_key]:
+                grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd}")
+
+        # Menyusun format teks sesuai permintaan baru
+        txt_lines = []
+        for tanggal, users_dict in grouped_data.items():
+            txt_lines.append(f"{tanggal}")
+            for (uid, uname), statuses in users_dict.items():
+                u_tag = f"@{uname}" if uname else f"User_{uid}"
+                txt_lines.append(u_tag)
+                
+                txt_lines.append("Gmail pending :")
+                if statuses['PENDING']:
+                    txt_lines.extend(statuses['PENDING'])
+                else:
+                    txt_lines.append("-")
+                
+                txt_lines.append("") 
+                txt_lines.append("Gmail approved")
+                if statuses['APPROVED']:
+                    txt_lines.extend(statuses['APPROVED'])
+                else:
+                    txt_lines.append("-")
+                
+                txt_lines.append("--------------------------------------------------")
 
         txt_content = "\n".join(txt_lines)
         txt_file = io.BytesIO(txt_content.encode('utf-8'))
-        filename = f"semua_riwayat_setoran_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        filename = f"rekap_realtime_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
 
         try:
             await context.bot.send_document(
                 chat_id=user.id,
                 document=txt_file,
                 filename=filename,
-                caption=f"📁 *REKAP RIWAYAT SEMUA SETORAN USER*\nTotal data: `{len(all_deposits)}` akun.",
+                caption=f"📁 *REKAP FORMAT BARU (REAL-TIME)*\nBerhasil memperbarui status Approved/Pending secara akurat.",
                 parse_mode='Markdown'
             )
-            await query.answer("✅ File riwayat semua user berhasil dikirim!", show_alert=False)
+            await query.answer("✅ File rekap real-time berhasil dikirim!", show_alert=False)
         except Exception as e:
             await query.answer(f"❌ Gagal mengirim file: {e}", show_alert=True)
 
@@ -856,7 +882,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     current_mode = context.user_data.get('mode')
 
-    # Cek apakah user mengirim dokumen (.txt) atau teks biasa
     raw_input_text = ""
     is_document_upload = False
 
@@ -1166,32 +1191,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
 
         if inserted_count > 0:
-            username_txt = f"@{user.username}" if user.username else "No Username"
+            username_txt = f"@{user.username}" if user.username else f"User_{user.id}"
             mode_label = "BULKING" if is_bulking_mode else "SATUAN"
             
+            # Mengambil seluruh data akun user ini dari database secara real-time untuk file .txt baru
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute("SELECT gmail, password FROM deposits WHERE user_id = %s AND status = 'PENDING'", (user.id,))
-            all_pending_user_accounts = cursor.fetchall()
+            cursor.execute("SELECT gmail, password, status, created_at FROM deposits WHERE user_id = %s", (user.id,))
+            user_all_deposits = cursor.fetchall()
             cursor.close()
             conn.close()
 
-            laporan_admin_text = (
-                f"📥 *SETORAN {mode_label} BARU MASUK (AKUMULASI)*\n"
-                f"═══════════════════════\n"
-                f"👤 *User:* {user.first_name} ({username_txt})\n"
-                f"🆔 *ID User:* `{user.id}`\n"
-                f"📦 *Akun Baru Masuk:* `{inserted_count}` Akun\n"
-                f"📂 *Total Akun Pending Saat Ini:* `{len(all_pending_user_accounts)}` Akun\n"
-                f"═══════════════════════\n"
-                f"📄 *File .txt ini berisi seluruh total akun pending user tersebut.*"
-            )
+            pending_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'PENDING']
+            approved_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'APPROVED']
+            
+            tgl_hari_ini = datetime.now().strftime('%d-%m-%Y')
 
-            txt_content = "\n".join([f"{g}:{p}" for g, p in all_pending_user_accounts])
+            txt_lines = [
+                f"{tgl_hari_ini}",
+                username_txt,
+                "Gmail pending :"
+            ]
+            if pending_list:
+                txt_lines.extend(pending_list)
+            else:
+                txt_lines.append("-")
+
+            txt_lines.append("")
+            txt_lines.append("Gmail approved")
+            if approved_list:
+                txt_lines.extend(approved_list)
+            else:
+                txt_lines.append("-")
+
+            txt_content = "\n".join(txt_lines)
             txt_file = io.BytesIO(txt_content.encode('utf-8'))
             
             timestamp_file = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"setoran_{user.id}_{timestamp_file}.txt"
+
+            laporan_admin_text = (
+                f"📥 *SETORAN {mode_label} BARU MASUK*\n"
+                f"═══════════════════════\n"
+                f"👤 *User:* {user.first_name} ({username_txt})\n"
+                f"📦 *Akun Baru Masuk:* `{inserted_count}` Akun\n"
+                f"═══════════════════════\n"
+                f"📄 *File .txt di atas sudah menggunakan format baru & real-time status.*"
+            )
 
             try:
                 await context.bot.send_document(
