@@ -18,7 +18,7 @@ def get_wib_time():
     wib_timezone = timezone(timedelta(hours=7))
     return datetime.now(wib_timezone).strftime("%d-%m-%Y %H:%M:%S WIB")
 
-# Master daftar semua sandi yang dikelola bot beserta status default-nya (termasuk selaras9)
+# Master daftar semua sandi yang dikelola bot beserta status default-nya
 DEFAULT_MASTER_PASSWORDS = {
     'fineirga': 'ACTIVE',
     'sgsg1122': 'ACTIVE',
@@ -56,6 +56,7 @@ def init_db():
         )
     ''')
     
+    # Standardize/Migration Check for Deposits Table Status Defaults
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS deposits (
             id SERIAL PRIMARY KEY,
@@ -80,7 +81,6 @@ def init_db():
         )
     ''')
 
-    # Tabel pengaturan bot untuk status sandi secara dinamis
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS bot_settings (
             key TEXT PRIMARY KEY,
@@ -88,7 +88,6 @@ def init_db():
         )
     ''')
 
-    # Masukkan data default jika belum ada di database
     for pwd, default_status in DEFAULT_MASTER_PASSWORDS.items():
         setting_key = f"pwd_status_{pwd}"
         cursor.execute('''
@@ -296,6 +295,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'APPROVED'", (user.id,))
         app_count = cursor.fetchone()[0]
 
+        cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'PROCESSING'", (user.id,))
+        proc_count = cursor.fetchone()[0]
+
         cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'PENDING'", (user.id,))
         pen_count = cursor.fetchone()[0]
 
@@ -306,14 +308,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
+        total_pending_all = proc_count + pen_count
+
         pesan = (
             f"📊 *INFORMASI AKUN & SALDO*\n"
             f"═══════════════════════\n"
-            f"💵 *Saldo Dapat Dicairkan:* Rp {balance_ready:,}\n"
-            f"⏳ *Saldo Tertahan (Pending):* Rp {pen_count * HARGA_PER_GMAIL:,}\n"
+            f"💵 *Saldo Siap Dicairkan:* Rp {balance_ready:,}\n"
+            f"⏳ *Estimasi Saldo Tertahan:* Rp {total_pending_all * HARGA_PER_GMAIL:,}\n"
             f"═══════════════════════\n"
             f"✅ *Gmail Disetujui (Approved):* {app_count} Akun\n"
-            f"⏳ *Gmail Menunggu (Pending):* {pen_count} Akun\n"
+            f"🔄 *Gmail Diproses (Processing):* {proc_count} Akun\n"
+            f"⏳ *Gmail Menunggu Rekap (Pending):* {pen_count} Akun\n"
             f"═══════════════════════"
         )
         await query.edit_message_text(pesan, reply_markup=back_keyboard(), parse_mode='Markdown')
@@ -332,9 +337,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             pesan = "📜 *DAFTAR SETORAN GMAIL (15 Terakhir)*\n═══════════════════════\n"
             for g_mail, st, dt in items:
-                status_icon = "⌛ PENDING"
-                if st == "APPROVED":
-                    status_icon = "✅ APPROVED"
+                status_icon = "⏳ PENDING"
+                if st == "PROCESSING":
+                    status_icon = "🔄 PROCESSING (Sudah Rekap)"
+                elif st == "APPROVED":
+                    status_icon = "✅ APPROVED (Saldo Masuk)"
                 elif st == "REJECTED":
                     status_icon = "❌ REJECTED"
                 
@@ -503,7 +510,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_key = (uid, uname)
             if user_key not in grouped_data[tanggal_str]:
-                grouped_data[tanggal_str][user_key] = {'PENDING': [], 'APPROVED': [], 'REJECTED': []}
+                grouped_data[tanggal_str][user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': [], 'REJECTED': []}
             
             if status in grouped_data[tanggal_str][user_key]:
                 grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd}")
@@ -511,7 +518,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt_lines = []
         for tanggal, users_dict in grouped_data.items():
             total_akun_tanggal = sum(
-                len(s['PENDING']) + len(s['APPROVED']) + len(s['REJECTED']) 
+                len(s['PENDING']) + len(s['PROCESSING']) + len(s['APPROVED']) + len(s['REJECTED']) 
                 for s in users_dict.values()
             )
             txt_lines.append(f"📅 TANGGAL SETOR: {tanggal} (Total Akun: {total_akun_tanggal})")
@@ -520,20 +527,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for (uid, uname), statuses_dict in users_dict.items():
                 u_tag = f"@{uname}" if uname else f"User_{uid}"
                 tot_p = len(statuses_dict['PENDING'])
+                tot_pr = len(statuses_dict['PROCESSING'])
                 tot_a = len(statuses_dict['APPROVED'])
                 tot_r = len(statuses_dict['REJECTED'])
-                tot_user = tot_p + tot_a + tot_r
+                tot_user = tot_p + tot_pr + tot_a + tot_r
 
                 txt_lines.append(f"👤 {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
                 
-                txt_lines.append(f"  • Gmail Pending ({tot_p}) :")
+                txt_lines.append(f"  • Gmail Pending (Belum Rekap) ({tot_p}) :")
                 if statuses_dict['PENDING']:
                     for item in statuses_dict['PENDING']:
                         txt_lines.append(f"    {item}")
                 else:
                     txt_lines.append("    -")
                 
-                txt_lines.append(f"  • Gmail Approved ({tot_a}) :")
+                txt_lines.append(f"  • Gmail Processing (Sudah Rekap) ({tot_pr}) :")
+                if statuses_dict['PROCESSING']:
+                    for item in statuses_dict['PROCESSING']:
+                        txt_lines.append(f"    {item}")
+                else:
+                    txt_lines.append("    -")
+
+                txt_lines.append(f"  • Gmail Approved (Saldo Masuk) ({tot_a}) :")
                 if statuses_dict['APPROVED']:
                     for item in statuses_dict['APPROVED']:
                         txt_lines.append(f"    {item}")
@@ -581,7 +596,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SELECT deposits.user_id, users.username, COUNT(*) 
             FROM deposits 
             LEFT JOIN users ON deposits.user_id = users.user_id 
-            WHERE deposits.status = 'PENDING' 
+            WHERE deposits.status IN ('PENDING', 'PROCESSING') 
             GROUP BY deposits.user_id, users.username
         ''')
         user_list = cursor.fetchall()
@@ -589,20 +604,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         if not user_list:
-            await query.edit_message_text("✅ *Tidak ada setoran pending saat ini.*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Panel Admin", callback_data="admin_panel")]]), parse_mode='Markdown')
+            await query.edit_message_text("✅ *Tidak ada setoran pending atau processing saat ini.*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Panel Admin", callback_data="admin_panel")]]), parse_mode='Markdown')
             return
 
         keyboard = []
         for target_uid, uname, cnt in user_list:
             u_text = f"@{uname}" if uname else f"ID: {target_uid}"
-            keyboard.append([InlineKeyboardButton(f"👤 {u_text} ({cnt} Akun)", callback_data=f"admuser_{target_uid}")])
+            keyboard.append([InlineKeyboardButton(f"👤 {u_text} ({cnt} Akun Active)", callback_data=f"admuser_{target_uid}")])
         
         keyboard.append([InlineKeyboardButton("« Kembali ke Panel Admin", callback_data="admin_panel")])
 
         pesan = (
-            f"⚙️ *PANEL ADMIN - KELOLA SETORAN PENDING*\n"
+            f"⚙️ *PANEL ADMIN - KELOLA SETORAN UNTUK VERIFIKASI*\n"
             f"═══════════════════════\n"
-            f"Pilih user di bawah ini untuk melihat dan mengelola daftar akun:"
+            f"Pilih user di bawah ini untuk melihat dan mengelola status akun:"
         )
         await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -649,6 +664,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("« Kembali ke Panel Admin", callback_data="admin_panel")])
         await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
+    # --- FITUR AUTO REKAP / PROCESSING MASSAL (GLOBAL PASTE LIST) ---
+    elif data == "global_paste_process_ask":
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        context.user_data['mode'] = 'WAITING_GLOBAL_PASTE_PROCESS'
+        pesan = (
+            f"🔄 *AUTO REKAP (PROCESSING) MASSAL VIA PASTE LIST*\n"
+            f"═══════════════════════\n"
+            f"Ubah status dari *PENDING* ke *PROCESSING* (Sistem/Admin sudah rekap).\n\n"
+            f"Silakan *ketik, paste daftar email, atau kirim file .txt* yang sudah direkap (satu email per baris).\n"
+            f"Format fleksibel: `email@gmail.com` atau `email@gmail.com:password`."
+        )
+        await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
+
     # --- FITUR AUTO APPROVE MASSAL (GLOBAL PASTE LIST) ---
     elif data == "global_paste_approve_ask":
         if user.id != ADMIN_CHAT_ID:
@@ -659,7 +690,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pesan = (
             f"✅ *AUTO APPROVE MASSAL VIA PASTE LIST (GLOBAL)*\n"
             f"═══════════════════════\n"
-            f"Fitur ini berlaku untuk *SELURUH SETORAN PENDING ALL USER*.\n\n"
+            f"Fitur ini berlaku untuk *SETORAN PENDING/PROCESSING ALL USER*.\n\n"
             f"Silakan *ketik, paste daftar email, atau kirim file .txt* yang ingin di-approve (satu email per baris).\n"
             f"Format fleksibel: `email@gmail.com` atau `email@gmail.com:password`."
         )
@@ -679,7 +710,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pesan = (
             f"❌ *AUTO REJECT MASSAL VIA PASTE LIST (GLOBAL)*\n"
             f"═══════════════════════\n"
-            f"Fitur ini berlaku untuk *SELURUH SETORAN PENDING ALL USER*.\n\n"
+            f"Fitur ini berlaku untuk *SETORAN PENDING/PROCESSING ALL USER*.\n\n"
             f"Pilih alasan penolakan terlebih dahulu sebelum memasukkan daftar email:"
         )
         await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -699,6 +730,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"═══════════════════════\n"
             f"📌 *Alasan Dipilih:* {chosen_reason}\n\n"
             f"Sekarang, silakan *ketik, paste daftar email, atau kirim file .txt* yang ingin di-reject (satu email per baris)."
+        )
+        await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
+
+    # --- FITUR BROADCAST / PENGUMUMAN MASSAL ---
+    elif data == "admin_broadcast":
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        context.user_data['mode'] = 'WAITING_BROADCAST_TEXT'
+        pesan = (
+            f"📢 *FITUR PENGUMUMAN MASSAL (BROADCAST)*\n"
+            f"═══════════════════════\n"
+            f"Pesan yang Anda kirim setelah ini akan disebarkan ke *SEMUA USER* yang terdaftar di database bot.\n\n"
+            f"Silakan ketik dan kirimkan teks pengumuman Anda sekarang:"
         )
         await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
 
@@ -742,7 +788,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM deposits WHERE user_id = %s AND status = 'PENDING'", (target_uid,))
+        cursor.execute("SELECT id FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (target_uid,))
         all_items = [row[0] for row in cursor.fetchall()]
         cursor.close()
         conn.close()
@@ -754,6 +800,45 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['selected_deps'] = all_items
 
         await render_admin_user_deposits(query, target_uid, context)
+
+    elif data == "do_sel_process":
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        target_uid = context.user_data.get('sel_target_uid')
+        selected_deps = context.user_data.get('selected_deps', [])
+
+        if not selected_deps:
+            await query.answer("⚠️ Belum ada akun yang dicentang!", show_alert=True)
+            return
+
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        placeholders = ','.join(['%s'] * len(selected_deps))
+        cursor.execute(f"UPDATE deposits SET status = 'PROCESSING' WHERE id IN ({placeholders})", tuple(selected_deps))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        count = len(selected_deps)
+        context.user_data['selected_deps'] = []
+
+        await query.edit_message_text(
+            f"🔄 *REKAP (PROCESSING) TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` diubah statusnya menjadi PROCESSING (Sudah Rekap).",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]),
+            parse_mode='Markdown'
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=target_uid,
+                text=f"🔄 *SETORAN TELAH DIREKAP!*\n\nSebanyak *{count} akun Gmail* kamu telah direkap oleh admin dan sekarang berada dalam tahap pengecekan (Processing).",
+                parse_mode='Markdown'
+            )
+        except Exception:
+            pass
 
     elif data == "do_sel_approve":
         if user.id != ADMIN_CHAT_ID:
@@ -975,9 +1060,11 @@ async def render_admin_panel(query):
         keyboard.append([InlineKeyboardButton(f"🔑 Sandi [{pwd}]: {st_icon}", callback_data=f"admin_toggle_pwd_{pwd}")])
 
     keyboard.extend([
-        [InlineKeyboardButton("⚙️ Kelola Setoran Gmail Pending", callback_data="admin_setoran")],
-        [InlineKeyboardButton("✅ Auto Approve Massal (Paste List)", callback_data="global_paste_approve_ask")],
-        [InlineKeyboardButton("❌ Auto Reject Massal (Paste List)", callback_data="global_paste_reject_ask")],
+        [InlineKeyboardButton("⚙️ Kelola Setoran Gmail Active", callback_data="admin_setoran")],
+        [InlineKeyboardButton("🔄 Auto Rekap Massal -> Processing", callback_data="global_paste_process_ask")],
+        [InlineKeyboardButton("✅ Auto Approve Massal -> Approved", callback_data="global_paste_approve_ask")],
+        [InlineKeyboardButton("❌ Auto Reject Massal -> Rejected", callback_data="global_paste_reject_ask")],
+        [InlineKeyboardButton("📢 Pengumuman / Broadcast All User", callback_data="admin_broadcast")],
         [InlineKeyboardButton("💸 Kelola Withdraw Pending", callback_data="admin_withdraw")],
         [InlineKeyboardButton("📂 Rekap Setoran Terpisah Realtime (.txt)", callback_data="admin_export_all_deposits")],
         [InlineKeyboardButton("« Kembali ke Menu Utama", callback_data="menu_utama")]
@@ -993,13 +1080,13 @@ async def render_admin_panel(query):
 async def render_admin_user_deposits(query, target_uid, context):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, gmail, password, created_at FROM deposits WHERE user_id = %s AND status = 'PENDING'", (target_uid,))
+    cursor.execute("SELECT id, gmail, password, status, created_at FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (target_uid,))
     items = cursor.fetchall()
     cursor.close()
     conn.close()
 
     if not items:
-        await query.edit_message_text("✅ *Tidak ada setoran pending untuk user ini.*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]), parse_mode='Markdown')
+        await query.edit_message_text("✅ *Tidak ada setoran aktif (Pending/Processing) untuk user ini.*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]), parse_mode='Markdown')
         return
 
     selected_deps = context.user_data.get('selected_deps', [])
@@ -1007,17 +1094,19 @@ async def render_admin_user_deposits(query, target_uid, context):
     pesan = f"📧 *PILIH AKUN GMAIL (User ID: `{target_uid}`)*\n═══════════════════════\nSilakan centang akun yang ingin diproses:\n\n"
     keyboard = []
 
-    for dep_id, g_mail, p_ass, dt in items:
+    for dep_id, g_mail, p_ass, st, dt in items:
         is_checked = dep_id in selected_deps
         check_icon = "✅ [PILIH]" if is_checked else "⬜ [   ]"
+        st_tag = "⏳ PENDING" if st == 'PENDING' else "🔄 PROC"
         
-        pesan += f"{check_icon} `{g_mail}` | `{p_ass}`\n"
-        keyboard.append([InlineKeyboardButton(f"{check_icon} {g_mail}", callback_data=f"togdep_{dep_id}")])
+        pesan += f"{check_icon} `{g_mail}` | `{p_ass}` ({st_tag})\n"
+        keyboard.append([InlineKeyboardButton(f"{check_icon} {g_mail} ({st_tag})", callback_data=f"togdep_{dep_id}")])
 
     keyboard.append([InlineKeyboardButton("☑️ Pilih / Batalkan Semua", callback_data="togall_deps")])
     keyboard.append([
-        InlineKeyboardButton(f"✅ Approve Terpilih ({len(selected_deps)})", callback_data="do_sel_approve"),
-        InlineKeyboardButton(f"❌ Reject Terpilih ({len(selected_deps)})", callback_data="do_sel_reject_ask")
+        InlineKeyboardButton(f"🔄 Rekap ({len(selected_deps)})", callback_data="do_sel_process"),
+        InlineKeyboardButton(f"✅ Approve ({len(selected_deps)})", callback_data="do_sel_approve"),
+        InlineKeyboardButton(f"❌ Reject ({len(selected_deps)})", callback_data="do_sel_reject_ask")
     ])
     keyboard.append([InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")])
 
@@ -1067,9 +1156,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             pesan = "📜 *DAFTAR SETORAN GMAIL (15 Terakhir)*\n═══════════════════════\n"
             for g_mail, st, dt in items:
-                status_icon = "⌛ PENDING"
-                if st == "APPROVED":
-                    status_icon = "✅ APPROVED"
+                status_icon = "⏳ PENDING"
+                if st == "PROCESSING":
+                    status_icon = "🔄 PROCESSING (Sudah Rekap)"
+                elif st == "APPROVED":
+                    status_icon = "✅ APPROVED (Saldo Masuk)"
                 elif st == "REJECTED":
                     status_icon = "❌ REJECTED"
                 
@@ -1083,6 +1174,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'APPROVED'", (user.id,))
         app_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'PROCESSING'", (user.id,))
+        proc_count = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'PENDING'", (user.id,))
         pen_count = cursor.fetchone()[0]
         cursor.execute('SELECT balance FROM users WHERE user_id = %s', (user.id,))
@@ -1091,14 +1184,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
+        total_pending_all = proc_count + pen_count
+
         pesan = (
             f"📊 *INFORMASI AKUN & SALDO*\n"
             f"═══════════════════════\n"
-            f"💵 *Saldo Dapat Dicairkan:* Rp {balance_ready:,}\n"
-            f"⏳ *Saldo Tertahan (Pending):* Rp {pen_count * HARGA_PER_GMAIL:,}\n"
+            f"💵 *Saldo Siap Dicairkan:* Rp {balance_ready:,}\n"
+            f"⏳ *Estimasi Saldo Tertahan:* Rp {total_pending_all * HARGA_PER_GMAIL:,}\n"
             f"═══════════════════════\n"
-            f"✅ *Gmail Disetujui:* {app_count} Akun\n"
-            f"⏳ *Gmail Menunggu:* {pen_count} Akun\n"
+            f"✅ *Gmail Disetujui (Approved):* {app_count} Akun\n"
+            f"🔄 *Gmail Diproses (Processing):* {proc_count} Akun\n"
+            f"⏳ *Gmail Menunggu Rekap (Pending):* {pen_count} Akun\n"
             f"═══════════════════════"
         )
         await update.message.reply_text(pesan, reply_markup=back_keyboard(), parse_mode='Markdown')
@@ -1116,6 +1212,115 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     raw_lines = cleaned_text.split('\n')
     lines = [line.strip() for line in raw_lines if line.strip()]
+
+    # --- PROSES BROADCAST PENGUMUMAN MASSAL ---
+    if current_mode == 'WAITING_BROADCAST_TEXT':
+        if user.id != ADMIN_CHAT_ID:
+            return
+
+        broadcast_msg = raw_input_text
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users")
+        user_rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        all_user_ids = [r[0] for r in user_rows]
+        success_bcast = 0
+        failed_bcast = 0
+
+        for uid in all_user_ids:
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"📢 *PENGUMUMAN DARI ADMIN*\n═══════════════════════\n\n{broadcast_msg}",
+                    parse_mode='Markdown'
+                )
+                success_bcast += 1
+            except Exception:
+                failed_bcast += 1
+
+        context.user_data.clear()
+        await update.message.reply_text(
+            f"✅ *PENGUMUMAN BERHASIL DIKIRIM!*\n\n"
+            f"• Berhasil dikirim ke: `{success_bcast}` user\n"
+            f"• Gagal / Dibatalkan: `{failed_bcast}` user",
+            reply_markup=main_menu_keyboard(user.id),
+            parse_mode='Markdown'
+        )
+        return
+
+    # --- PROSES AUTO REKAP (PROCESSING) MASSAL VIA PASTE LIST (GLOBAL) ---
+    if current_mode == 'WAITING_GLOBAL_PASTE_PROCESS':
+        if user.id != ADMIN_CHAT_ID:
+            return
+
+        emails_to_process = []
+        for line in lines:
+            line_lower = line.lower()
+            if ':' in line_lower:
+                part = line_lower.split(':')[0].strip()
+                if '@gmail.com' in part:
+                    emails_to_process.append(part)
+            elif '@gmail.com' in line_lower:
+                emails_to_process.append(line_lower)
+
+        if not emails_to_process:
+            await update.message.reply_text(
+                "❌ *Format email tidak valid atau tidak ditemukan.*\nSilakan kirim ulang daftar email yang benar atau klik batal.",
+                reply_markup=cancel_keyboard(),
+                parse_mode='Markdown'
+            )
+            return
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        success_count = 0
+        not_found_count = 0
+        user_proc_map = {} # { user_id: count }
+
+        for email in emails_to_process:
+            cursor.execute("SELECT id, user_id FROM deposits WHERE gmail = %s AND status = 'PENDING'", (email,))
+            row = cursor.fetchone()
+            
+            if row:
+                dep_id, target_uid = row
+                cursor.execute("UPDATE deposits SET status = 'PROCESSING' WHERE id = %s", (dep_id,))
+                success_count += 1
+                
+                user_proc_map[target_uid] = user_proc_map.get(target_uid, 0) + 1
+            else:
+                not_found_count += 1
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        # Kirim Notifikasi ke User
+        for target_uid, proc_cnt in user_proc_map.items():
+            try:
+                await context.bot.send_message(
+                    chat_id=target_uid,
+                    text=(
+                        f"🔄 *SETORAN TELAH DIREKAP!*\n\n"
+                        f"Sebanyak *{proc_cnt} akun Gmail* kamu telah direkap oleh admin dan sekarang berada dalam tahap pengecekan (Processing)."
+                    ),
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                pass
+
+        context.user_data.clear()
+        await update.message.reply_text(
+            f"✅ *AUTO REKAP (PROCESSING) MASSAL GLOBAL BERHASIL!*\n\n"
+            f"• Berhasil diubah status ke PROCESSING: `{success_count}` akun untuk `{len(user_proc_map)}` user\n"
+            f"• Tidak cocok / bukan status PENDING: `{not_found_count}` akun",
+            reply_markup=main_menu_keyboard(user.id),
+            parse_mode='Markdown'
+        )
+        return
 
     # --- PROSES AUTO REJECT MASSAL VIA PASTE LIST (GLOBAL) ---
     if current_mode == 'WAITING_GLOBAL_PASTE_REJECT':
@@ -1151,7 +1356,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_notif_map = {} # { user_id: [rejected_emails] }
 
         for email in emails_to_reject:
-            cursor.execute("SELECT id, user_id FROM deposits WHERE gmail = %s AND status = 'PENDING'", (email,))
+            cursor.execute("SELECT id, user_id FROM deposits WHERE gmail = %s AND status IN ('PENDING', 'PROCESSING')", (email,))
             row = cursor.fetchone()
             
             if row:
@@ -1193,7 +1398,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ *AUTO REJECT MASSAL GLOBAL BERHASIL!*\n\n"
             f"• Berhasil di-reject & dinotifikasi: `{success_count}` akun dari `{len(user_notif_map)}` user\n"
-            f"• Tidak cocok / tidak pending: `{not_found_count}` akun\n"
+            f"• Tidak cocok / bukan status aktif: `{not_found_count}` akun\n"
             f"• Alasan: {chosen_reason}",
             reply_markup=main_menu_keyboard(user.id),
             parse_mode='Markdown'
@@ -1231,7 +1436,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_approve_map = {} # { user_id: count }
 
         for email in emails_to_approve:
-            cursor.execute("SELECT id, user_id FROM deposits WHERE gmail = %s AND status = 'PENDING'", (email,))
+            cursor.execute("SELECT id, user_id FROM deposits WHERE gmail = %s AND status IN ('PENDING', 'PROCESSING')", (email,))
             row = cursor.fetchone()
             
             if row:
@@ -1270,7 +1475,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ *AUTO APPROVE MASSAL GLOBAL BERHASIL!*\n\n"
             f"• Berhasil di-approve & ditambah saldo: `{success_count}` akun untuk `{len(user_approve_map)}` user\n"
-            f"• Tidak cocok / tidak pending: `{not_found_count}` akun\n"
+            f"• Tidak cocok / bukan status aktif: `{not_found_count}` akun\n"
             f"• Total nominal dikreditkan: Rp {success_count * HARGA_PER_GMAIL:,}",
             reply_markup=main_menu_keyboard(user.id),
             parse_mode='Markdown'
@@ -1420,7 +1625,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             now_str = get_wib_time()
 
-            cursor.execute('INSERT INTO deposits (user_id, gmail, password, created_at) VALUES (%s, %s, %s, %s)', (user.id, gmail, password, now_str))
+            cursor.execute("INSERT INTO deposits (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, 'PENDING', %s)", (user.id, gmail, password, now_str))
             conn.commit()
             inserted_count += 1
             successfully_inserted_accounts.append((gmail, password))
@@ -1441,6 +1646,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
 
             pending_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'PENDING']
+            proc_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'PROCESSING']
             approved_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'APPROVED']
             
             tgl_hari_ini = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
@@ -1450,7 +1656,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👤 USER: {username_txt} (ID: {user.id})",
                 f"📦 TOTAL AKUN SETORAN HARI INI: {len(successfully_inserted_accounts)} Akun",
                 "--------------------------------------------------",
-                "Gmail Pending :"
+                "Gmail Pending (Belum Rekap) :"
             ]
             if pending_list:
                 txt_lines.extend(pending_list)
@@ -1458,7 +1664,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 txt_lines.append("-")
 
             txt_lines.append("")
-            txt_lines.append("Gmail Approved :")
+            txt_lines.append("Gmail Processing (Sudah Rekap) :")
+            if proc_list:
+                txt_lines.extend(proc_list)
+            else:
+                txt_lines.append("-")
+
+            txt_lines.append("")
+            txt_lines.append("Gmail Approved (Saldo Masuk) :")
             if approved_list:
                 txt_lines.extend(approved_list)
             else:
@@ -1498,16 +1711,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if inserted_count > 0:
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'PENDING'", (user.id,))
-            total_pending_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (user.id,))
+            total_active_count = cursor.fetchone()[0]
             cursor.close()
             conn.close()
 
             msg_response += (
                 f"✅ *AKUN BERHASIL TERKIRIM & DIARKIBKAN!*\n\n"
-                f"📩 Total `{inserted_count}` akun baru ditambahkan.\n"
-                f"📂 Total akumulasi akun pending Anda saat ini: `{total_pending_count}` akun.\n"
-                f"⏳ Saldo tertahan keseluruhan: *Rp {total_pending_count * HARGA_PER_GMAIL:,}*\n"
+                f"📩 Total `{inserted_count}` akun baru ditambahkan (Status: Pending).\n"
+                f"📂 Total akumulasi akun aktif (Pending + Processing) Anda: `{total_active_count}` akun.\n"
+                f"⏳ Estimasi saldo tertahan: *Rp {total_active_count * HARGA_PER_GMAIL:,}*\n"
             )
         if duplicate_count > 0:
             msg_response += f"\n⚠️ `{duplicate_count}` akun ditolak otomatis karena sudah pernah dikirim sebelumnya."
@@ -1552,5 +1765,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_message))
 
-    print("Bot Setoran V29 Aktif (Real-time WIB Timezone Fixed)...")
+    print("Bot Setoran V29 Aktif (3 Tahapan Status & Broadcast Ready)...")
     app.run_polling()
