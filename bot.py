@@ -484,10 +484,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn = get_db()
         cursor = conn.cursor()
+        # Mengambil data selain REJECTED
         cursor.execute('''
             SELECT d.user_id, u.username, d.gmail, d.password, d.status, d.created_at 
             FROM deposits d 
             LEFT JOIN users u ON d.user_id = u.user_id 
+            WHERE d.status != 'REJECTED'
             ORDER BY d.created_at DESC, d.user_id DESC
         ''')
         all_deposits = cursor.fetchall()
@@ -495,7 +497,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         if not all_deposits:
-            await query.answer("⚠️ Belum ada riwayat setoran sama sekali di database.", show_alert=True)
+            await query.answer("⚠️ Belum ada riwayat setoran aktif di database.", show_alert=True)
             return
 
         wib_now_date = datetime.now(timezone(timedelta(hours=7))).strftime('%Y%m%d_%H%M%S')
@@ -504,21 +506,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for uid, uname, gmail, pwd, status, dt in all_deposits:
             tanggal_str = dt.split()[0] if dt and len(dt.split()) > 0 else datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
+            jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
             
             if tanggal_str not in grouped_data:
                 grouped_data[tanggal_str] = {}
             
             user_key = (uid, uname)
             if user_key not in grouped_data[tanggal_str]:
-                grouped_data[tanggal_str][user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': [], 'REJECTED': []}
+                grouped_data[tanggal_str][user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': []}
             
+            u_tag = f"@{uname}" if uname else f"User_{uid}"
             if status in grouped_data[tanggal_str][user_key]:
-                grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd}")
+                grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd} | {jam_str} WIB | User: {u_tag}")
 
         txt_lines = []
         for tanggal, users_dict in grouped_data.items():
             total_akun_tanggal = sum(
-                len(s['PENDING']) + len(s['PROCESSING']) + len(s['APPROVED']) + len(s['REJECTED']) 
+                len(s['PENDING']) + len(s['PROCESSING']) + len(s['APPROVED']) 
                 for s in users_dict.values()
             )
             txt_lines.append(f"📅 TANGGAL SETOR: {tanggal} (Total Akun: {total_akun_tanggal})")
@@ -529,8 +533,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tot_p = len(statuses_dict['PENDING'])
                 tot_pr = len(statuses_dict['PROCESSING'])
                 tot_a = len(statuses_dict['APPROVED'])
-                tot_r = len(statuses_dict['REJECTED'])
-                tot_user = tot_p + tot_pr + tot_a + tot_r
+                tot_user = tot_p + tot_pr + tot_a
 
                 txt_lines.append(f"👤 {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
                 
@@ -554,19 +557,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         txt_lines.append(f"    {item}")
                 else:
                     txt_lines.append("    -")
-
-                txt_lines.append(f"  • Gmail Rejected ({tot_r}) :")
-                if statuses_dict['REJECTED']:
-                    for item in statuses_dict['REJECTED']:
-                        txt_lines.append(f"    {item}")
-                else:
-                    txt_lines.append("    -")
                 
                 txt_lines.append("--------------------------------------------------")
             txt_lines.append("\n")
 
         txt_lines.append("==================================================")
-        txt_lines.append(f"📊 KETERANGAN TOTAL AKUN KESELURUHAN: {total_semua_akun} Akun")
+        txt_lines.append(f"📊 KETERANGAN TOTAL AKUN AKTIF KESELURUHAN: {total_semua_akun} Akun")
         txt_lines.append("==================================================")
 
         txt_content = "\n".join(txt_lines)
@@ -1630,7 +1626,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 cursor.execute("INSERT INTO deposits (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, 'PENDING', %s)", (user.id, gmail_clean, password, now_str))
                 inserted_count += 1
-                successfully_inserted_accounts.append((gmail_clean, password))
+                successfully_inserted_accounts.append((gmail_clean, password, now_str))
             except psycopg2.IntegrityError:
                 conn.rollback()
                 duplicate_count += 1
@@ -1648,14 +1644,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute("SELECT gmail, password, status, created_at FROM deposits WHERE user_id = %s", (user.id,))
+            # Ambil hanya yang statusnya bukan REJECTED
+            cursor.execute("SELECT gmail, password, status, created_at FROM deposits WHERE user_id = %s AND status != 'REJECTED'", (user.id,))
             user_all_deposits = cursor.fetchall()
             cursor.close()
             conn.close()
 
-            pending_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'PENDING']
-            proc_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'PROCESSING']
-            approved_list = [f"{g}:{p}" for g, p, st, _ in user_all_deposits if st == 'APPROVED']
+            pending_list = []
+            proc_list = []
+            approved_list = []
+
+            for g, p, st, dt in user_all_deposits:
+                jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
+                formatted_item = f"{g}:{p} | {jam_str} WIB | User: {username_txt}"
+                if st == 'PENDING':
+                    pending_list.append(formatted_item)
+                elif st == 'PROCESSING':
+                    proc_list.append(formatted_item)
+                elif st == 'APPROVED':
+                    approved_list.append(formatted_item)
             
             tgl_hari_ini = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
 
@@ -1686,7 +1693,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 txt_lines.append("-")
 
             txt_lines.append("--------------------------------------------------")
-            txt_lines.append(f"📊 KETERANGAN TOTAL AKUN USER TERBARU: {len(user_all_deposits)} Akun")
+            txt_lines.append(f"📊 KETERANGAN TOTAL AKUN AKTIF USER TERBARU: {len(user_all_deposits)} Akun")
 
             txt_content = "\n".join(txt_lines)
             txt_file = io.BytesIO(txt_content.encode('utf-8'))
