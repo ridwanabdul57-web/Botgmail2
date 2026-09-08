@@ -97,7 +97,7 @@ def init_db():
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dep_user ON deposits(user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wd_user ON withdrawals(user_id)")
-    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dep_lower_gmail ON deposits(LOWER(gmail))")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dep_lower_gmail ON deposits(TRIM(LOWER(gmail)))")
         
     conn.commit()
     cursor.close()
@@ -1278,7 +1278,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_proc_map = {}
 
         for email in emails_to_process:
-            cursor.execute("SELECT id, user_id FROM deposits WHERE LOWER(gmail) = LOWER(%s) AND status = 'PENDING'", (email,))
+            cursor.execute("SELECT id, user_id FROM deposits WHERE TRIM(LOWER(gmail)) = TRIM(LOWER(%s)) AND status = 'PENDING'", (email,))
             row = cursor.fetchone()
             
             if row:
@@ -1350,7 +1350,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_notif_map = {}
 
         for email in emails_to_reject:
-            cursor.execute("SELECT id, user_id FROM deposits WHERE LOWER(gmail) = LOWER(%s) AND status IN ('PENDING', 'PROCESSING')", (email,))
+            cursor.execute("SELECT id, user_id FROM deposits WHERE TRIM(LOWER(gmail)) = TRIM(LOWER(%s)) AND status IN ('PENDING', 'PROCESSING')", (email,))
             row = cursor.fetchone()
             
             if row:
@@ -1429,7 +1429,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_approve_map = {}
 
         for email in emails_to_approve:
-            cursor.execute("SELECT id, user_id FROM deposits WHERE LOWER(gmail) = LOWER(%s) AND status IN ('PENDING', 'PROCESSING')", (email,))
+            cursor.execute("SELECT id, user_id FROM deposits WHERE TRIM(LOWER(gmail)) = TRIM(LOWER(%s)) AND status IN ('PENDING', 'PROCESSING')", (email,))
             row = cursor.fetchone()
             
             if row:
@@ -1571,32 +1571,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
-    # Parse data input
-    if current_mode == 'SATUAN':
-        satuan_pattern = r'([a-zA-Z0-9._%+-]+@gmail\.com)\s*:\s*(.+)'
-        for line in lines:
-            match = re.match(satuan_pattern, line, re.IGNORECASE)
-            if match:
-                g_mail = match.group(1).lower().strip()
-                g_pass = match.group(2).strip()
-                if g_pass in allowed_pwds:
-                    items_to_process.append((g_mail, g_pass))
+    # --- EKSTRAKSI & PEMERIKSAAN FORMAT YANG DITINGKATKAN (ANTI TEMBUS) ---
+    for line in lines:
+        line_clean = line.strip()
+        if not line_clean:
+            continue
 
-    elif is_bulking_mode:
-        for line in lines:
-            line_clean = line.strip()
-            if '@gmail.com' in line_clean.lower():
-                if ':' in line_clean:
-                    extracted_email = line_clean.split(':')[0].strip().lower()
-                else:
-                    extracted_email = line_clean.lower()
-                
-                if extracted_email.endswith('@gmail.com'):
-                    items_to_process.append((extracted_email, bulk_password_used))
+        extracted_email = ""
+        extracted_pwd = ""
 
-        total_input_count = len(items_to_process)
-        if total_input_count > MAX_BULK_LIMIT:
-            items_to_process = items_to_process[:MAX_BULK_LIMIT]
+        if ':' in line_clean:
+            parts = line_clean.split(':', 1)
+            extracted_email = parts[0].strip().lower()
+            extracted_pwd = parts[1].strip()
+        else:
+            extracted_email = line_clean.strip().lower()
+
+        # Validasi struktur email
+        if extracted_email.endswith('@gmail.com') and len(extracted_email) > 10:
+            if current_mode == 'SATUAN':
+                if extracted_pwd in allowed_pwds:
+                    items_to_process.append((extracted_email, extracted_pwd))
+            elif is_bulking_mode:
+                items_to_process.append((extracted_email, bulk_password_used))
+
+    total_input_count = len(items_to_process)
+    if is_bulking_mode and total_input_count > MAX_BULK_LIMIT:
+        items_to_process = items_to_process[:MAX_BULK_LIMIT]
 
     # --- PENGECEKAN DUPLIKAT DENGAN FITUR GLOBAL ANTI-FRAUD ---
     if items_to_process:
@@ -1610,7 +1611,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seen_batch_emails = set() # Menolak duplikat dalam 1 kiriman teks
 
         for gmail, password in items_to_process:
-            gmail_clean = gmail.lower().strip()
+            gmail_clean = gmail.strip().lower()
 
             # Pengecekan 1: Cek duplikat dalam 1 kali kirim
             if gmail_clean in seen_batch_emails:
@@ -1618,17 +1619,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             seen_batch_emails.add(gmail_clean)
 
-            # Pengecekan 2: Cek duplikat di SELURUH Database (Multi-user & All Status Auto Reject)
-            cursor.execute('SELECT id FROM deposits WHERE LOWER(gmail) = LOWER(%s)', (gmail_clean,))
+            # Pengecekan 2: Cek duplikat di SELURUH Database (Akurat dengan TRIM)
+            cursor.execute('SELECT id FROM deposits WHERE TRIM(LOWER(gmail)) = TRIM(LOWER(%s))', (gmail_clean,))
             if cursor.fetchone():
                 duplicate_count += 1
                 continue
 
             now_str = get_wib_time()
 
-            cursor.execute("INSERT INTO deposits (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, 'PENDING', %s)", (user.id, gmail_clean, password, now_str))
-            inserted_count += 1
-            successfully_inserted_accounts.append((gmail_clean, password))
+            try:
+                cursor.execute("INSERT INTO deposits (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, 'PENDING', %s)", (user.id, gmail_clean, password, now_str))
+                inserted_count += 1
+                successfully_inserted_accounts.append((gmail_clean, password))
+            except psycopg2.IntegrityError:
+                conn.rollback()
+                duplicate_count += 1
+                cursor = conn.cursor()
+                continue
 
         conn.commit()
         cursor.close()
