@@ -56,7 +56,6 @@ def init_db():
         )
     ''')
     
-    # Standardize/Migration Check for Deposits Table Status Defaults
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS deposits (
             id SERIAL PRIMARY KEY,
@@ -98,6 +97,7 @@ def init_db():
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dep_user ON deposits(user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wd_user ON withdrawals(user_id)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dep_lower_gmail ON deposits(LOWER(gmail))")
         
     conn.commit()
     cursor.close()
@@ -182,7 +182,7 @@ def get_welcome_text(first_name):
         pwd_str = "_Tidak ada sandi yang aktif saat ini_"
 
     return (
-        f"✨ *SELAMAT DATANG DI BOT SETORAN GMAIL V29* ✨\n"
+        f"✨ *SELAMAT DATANG DI BOT SETORAN GMAIL V30* ✨\n"
         f"Halo *{first_name}*! Silakan baca informasi & aturan setoran di bawah ini:\n\n"
         f"💵 *INFORMASI RATE & PROSES*\n"
         f"• *Rate Per Akun:* Rp 4.000\n"
@@ -191,7 +191,7 @@ def get_welcome_text(first_name):
         f"🔑 *ATURAN KATA SANDI (PASSWORD AKTIF)*\n"
         f"• Password yang valid hari ini: {pwd_str}\n\n"
         f"⚠️ *SYARAT & KETENTUAN WAJIB*\n"
-        f"1. *Dilarang Double-Sell:* Jangan pernah menjual kembali atau mengganti kata sandi akun selama proses verifikasi.\n"
+        f"1. *Dilarang Double-Sell:* Dilarang keras menyetor Gmail duplikat yang sudah pernah terdaftar di bot.\n"
         f"2. *Nomor HP Pemulihan:* Wajib dikosongkan / jangan diverifikasi.\n"
         f"3. *Kondisi Akun:* Akun langsung menampilkan opsi sandi (Good), bukan captcha.\n\n"
         f"👇 *Pilih menu di bawah ini untuk memulai:* "
@@ -345,7 +345,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif st == "REJECTED":
                     status_icon = "❌ REJECTED"
                 
-                waktu = dt if dt else datetime.now().strftime("%d-%m-%Y %H:%M:%S WIB")
+                waktu = dt if dt else get_wib_time()
                 pesan += f"📧 `{g_mail}`\n└ Status: *{status_icon}*\n└ Waktu: `{waktu}`\n\n"
 
         await query.edit_message_text(pesan, reply_markup=back_keyboard(), parse_mode='Markdown')
@@ -664,7 +664,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("« Kembali ke Panel Admin", callback_data="admin_panel")])
         await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    # --- FITUR AUTO REKAP / PROCESSING MASSAL (GLOBAL PASTE LIST) ---
     elif data == "global_paste_process_ask":
         if user.id != ADMIN_CHAT_ID:
             await query.answer("❌ Akses khusus Admin!", show_alert=True)
@@ -680,7 +679,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
 
-    # --- FITUR AUTO APPROVE MASSAL (GLOBAL PASTE LIST) ---
     elif data == "global_paste_approve_ask":
         if user.id != ADMIN_CHAT_ID:
             await query.answer("❌ Akses khusus Admin!", show_alert=True)
@@ -696,7 +694,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
 
-    # --- FITUR AUTO REJECT MASSAL (GLOBAL PASTE LIST) ---
     elif data == "global_paste_reject_ask":
         if user.id != ADMIN_CHAT_ID:
             await query.answer("❌ Akses khusus Admin!", show_alert=True)
@@ -733,7 +730,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
 
-    # --- FITUR BROADCAST / PENGUMUMAN MASSAL ---
     elif data == "admin_broadcast":
         if user.id != ADMIN_CHAT_ID:
             await query.answer("❌ Akses khusus Admin!", show_alert=True)
@@ -1279,17 +1275,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success_count = 0
         not_found_count = 0
-        user_proc_map = {} # { user_id: count }
+        user_proc_map = {}
 
         for email in emails_to_process:
-            cursor.execute("SELECT id, user_id FROM deposits WHERE gmail = %s AND status = 'PENDING'", (email,))
+            cursor.execute("SELECT id, user_id FROM deposits WHERE LOWER(gmail) = LOWER(%s) AND status = 'PENDING'", (email,))
             row = cursor.fetchone()
             
             if row:
                 dep_id, target_uid = row
                 cursor.execute("UPDATE deposits SET status = 'PROCESSING' WHERE id = %s", (dep_id,))
                 success_count += 1
-                
                 user_proc_map[target_uid] = user_proc_map.get(target_uid, 0) + 1
             else:
                 not_found_count += 1
@@ -1298,7 +1293,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
-        # Kirim Notifikasi ke User
         for target_uid, proc_cnt in user_proc_map.items():
             try:
                 await context.bot.send_message(
@@ -1353,10 +1347,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success_count = 0
         not_found_count = 0
-        user_notif_map = {} # { user_id: [rejected_emails] }
+        user_notif_map = {}
 
         for email in emails_to_reject:
-            cursor.execute("SELECT id, user_id FROM deposits WHERE gmail = %s AND status IN ('PENDING', 'PROCESSING')", (email,))
+            cursor.execute("SELECT id, user_id FROM deposits WHERE LOWER(gmail) = LOWER(%s) AND status IN ('PENDING', 'PROCESSING')", (email,))
             row = cursor.fetchone()
             
             if row:
@@ -1374,7 +1368,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
-        # Kirim Notifikasi ke Masing-Masing User
         for target_uid, emails in user_notif_map.items():
             try:
                 email_list_str = "\n".join([f"• `{e}`" for e in emails])
@@ -1433,20 +1426,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success_count = 0
         not_found_count = 0
-        user_approve_map = {} # { user_id: count }
+        user_approve_map = {}
 
         for email in emails_to_approve:
-            cursor.execute("SELECT id, user_id FROM deposits WHERE gmail = %s AND status IN ('PENDING', 'PROCESSING')", (email,))
+            cursor.execute("SELECT id, user_id FROM deposits WHERE LOWER(gmail) = LOWER(%s) AND status IN ('PENDING', 'PROCESSING')", (email,))
             row = cursor.fetchone()
             
             if row:
                 dep_id, target_uid = row
                 cursor.execute("UPDATE deposits SET status = 'APPROVED' WHERE id = %s", (dep_id,))
-                
-                # Tambah Saldo User
                 cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (HARGA_PER_GMAIL, target_uid))
                 success_count += 1
-                
                 user_approve_map[target_uid] = user_approve_map.get(target_uid, 0) + 1
             else:
                 not_found_count += 1
@@ -1455,7 +1445,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
-        # Kirim Notifikasi & Saldo ke Masing-Masing User
         for target_uid, app_cnt in user_approve_map.items():
             tot_added = app_cnt * HARGA_PER_GMAIL
             try:
@@ -1582,12 +1571,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
+    # Parse data input
     if current_mode == 'SATUAN':
         satuan_pattern = r'([a-zA-Z0-9._%+-]+@gmail\.com)\s*:\s*(.+)'
         for line in lines:
             match = re.match(satuan_pattern, line, re.IGNORECASE)
             if match:
-                g_mail = match.group(1).lower()
+                g_mail = match.group(1).lower().strip()
                 g_pass = match.group(2).strip()
                 if g_pass in allowed_pwds:
                     items_to_process.append((g_mail, g_pass))
@@ -1608,6 +1598,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if total_input_count > MAX_BULK_LIMIT:
             items_to_process = items_to_process[:MAX_BULK_LIMIT]
 
+    # --- PENGECEKAN DUPLIKAT DENGAN FITUR GLOBAL ANTI-FRAUD ---
     if items_to_process:
         conn = get_db()
         cursor = conn.cursor()
@@ -1616,20 +1607,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         inserted_count = 0
         duplicate_count = 0
         successfully_inserted_accounts = []
+        seen_batch_emails = set() # Menolak duplikat dalam 1 kiriman teks
 
         for gmail, password in items_to_process:
-            cursor.execute('SELECT id FROM deposits WHERE gmail = %s', (gmail,))
+            gmail_clean = gmail.lower().strip()
+
+            # Pengecekan 1: Cek duplikat dalam 1 kali kirim
+            if gmail_clean in seen_batch_emails:
+                duplicate_count += 1
+                continue
+            seen_batch_emails.add(gmail_clean)
+
+            # Pengecekan 2: Cek duplikat di SELURUH Database (Multi-user & All Status Auto Reject)
+            cursor.execute('SELECT id FROM deposits WHERE LOWER(gmail) = LOWER(%s)', (gmail_clean,))
             if cursor.fetchone():
                 duplicate_count += 1
                 continue
 
             now_str = get_wib_time()
 
-            cursor.execute("INSERT INTO deposits (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, 'PENDING', %s)", (user.id, gmail, password, now_str))
-            conn.commit()
+            cursor.execute("INSERT INTO deposits (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, 'PENDING', %s)", (user.id, gmail_clean, password, now_str))
             inserted_count += 1
-            successfully_inserted_accounts.append((gmail, password))
+            successfully_inserted_accounts.append((gmail_clean, password))
 
+        conn.commit()
         cursor.close()
         conn.close()
         context.user_data.clear()
@@ -1723,7 +1724,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏳ Estimasi saldo tertahan: *Rp {total_active_count * HARGA_PER_GMAIL:,}*\n"
             )
         if duplicate_count > 0:
-            msg_response += f"\n⚠️ `{duplicate_count}` akun ditolak otomatis karena sudah pernah dikirim sebelumnya."
+            msg_response += f"\n⚠️ *AUTO REJECT:* `{duplicate_count}` akun ditolak otomatis oleh sistem karena akun/Gmail tersebut sudah pernah terdaftar di database (Anti-Kecurangan)."
 
         if is_bulking_mode and total_input_count > MAX_BULK_LIMIT:
             msg_response += (
@@ -1765,5 +1766,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_message))
 
-    print("Bot Setoran V29 Aktif (3 Tahapan Status & Broadcast Ready)...")
+    print("Bot Setoran V30 Aktif (System Auto Reject Fraud Activated)...")
     app.run_polling()
