@@ -13,6 +13,23 @@ CS_USERNAME = 'bossgmailbotcs'
 HARGA_PER_GMAIL = 4000
 MAX_BULK_LIMIT = 50
 
+# Deskripsi Bawaan / Default jika belum di-set oleh Admin
+DEFAULT_WELCOME_TEXT = (
+    "✨ *SELAMAT DATANG DI BOT SETORAN GMAIL V30* ✨\n"
+    "Halo *{first_name}*! Silakan baca informasi & aturan setoran di bawah ini:\n\n"
+    "💵 *INFORMASI RATE & PROSES*\n"
+    "• *Rate Per Akun:* Rp 4.000\n"
+    "• *Estimasi Pengecekan:* 24 - 48 Jam Kerja\n"
+    "• *Batas Bulking:* Maksimal 50 akun / setor\n\n"
+    "🔑 *ATURAN KATA SANDI (PASSWORD AKTIF)*\n"
+    "• Password yang valid hari ini: {pwd_str}\n\n"
+    "⚠️ *SYARAT & KETENTUAN WAJIB*\n"
+    "1. *Dilarang Double-Sell:* Dilarang keras menyetor Gmail duplikat yang sudah pernah terdaftar di bot.\n"
+    "2. *Nomor HP Pemulihan:* Wajib dikosongkan / jangan diverifikasi.\n"
+    "3. *Kondisi Akun:* Akun langsung menampilkan opsi sandi (Good), bukan captcha.\n\n"
+    "👇 *Pilih menu di bawah ini untuk memulai:*"
+)
+
 # Helper untuk mendapatkan waktu WIB yang akurat
 def get_wib_time():
     wib_timezone = timezone(timedelta(hours=7))
@@ -95,6 +112,13 @@ def init_db():
             ON CONFLICT (key) DO NOTHING
         ''', (setting_key, default_status))
 
+    # Set default welcome_text ke database
+    cursor.execute('''
+        INSERT INTO bot_settings (key, value) 
+        VALUES ('welcome_text', %s) 
+        ON CONFLICT (key) DO NOTHING
+    ''', (DEFAULT_WELCOME_TEXT,))
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dep_user ON deposits(user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wd_user ON withdrawals(user_id)")
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dep_lower_gmail ON deposits(TRIM(LOWER(gmail)))")
@@ -136,6 +160,31 @@ def set_password_status(password: str, status: str):
 def get_current_allowed_passwords():
     statuses = get_all_password_statuses()
     return [pwd for pwd, st in statuses.items() if st == 'ACTIVE']
+
+def get_welcome_text_db():
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM bot_settings WHERE key = 'welcome_text'")
+        res = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if res and res[0]:
+            return res[0]
+    except Exception:
+        pass
+    return DEFAULT_WELCOME_TEXT
+
+def set_welcome_text_db(text: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO bot_settings (key, value) VALUES ('welcome_text', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", 
+        (text,)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 # ----------------- KEYBOARD MENUS -----------------
 def persistent_reply_keyboard():
@@ -181,21 +230,11 @@ def get_welcome_text(first_name):
     else:
         pwd_str = "_Tidak ada sandi yang aktif saat ini_"
 
-    return (
-        f"✨ *SELAMAT DATANG DI BOT SETORAN GMAIL V30* ✨\n"
-        f"Halo *{first_name}*! Silakan baca informasi & aturan setoran di bawah ini:\n\n"
-        f"💵 *INFORMASI RATE & PROSES*\n"
-        f"• *Rate Per Akun:* Rp 4.000\n"
-        f"• *Estimasi Pengecekan:* 24 - 48 Jam Kerja\n"
-        f"• *Batas Bulking:* Maksimal {MAX_BULK_LIMIT} akun / setor\n\n"
-        f"🔑 *ATURAN KATA SANDI (PASSWORD AKTIF)*\n"
-        f"• Password yang valid hari ini: {pwd_str}\n\n"
-        f"⚠️ *SYARAT & KETENTUAN WAJIB*\n"
-        f"1. *Dilarang Double-Sell:* Dilarang keras menyetor Gmail duplikat yang sudah pernah terdaftar di bot.\n"
-        f"2. *Nomor HP Pemulihan:* Wajib dikosongkan / jangan diverifikasi.\n"
-        f"3. *Kondisi Akun:* Akun langsung menampilkan opsi sandi (Good), bukan captcha.\n\n"
-        f"👇 *Pilih menu di bawah ini untuk memulai:* "
-    )
+    template = get_welcome_text_db()
+    
+    # Format variabel {first_name} dan {pwd_str} jika ada pada template
+    formatted_text = template.replace("{first_name}", str(first_name)).replace("{pwd_str}", pwd_str)
+    return formatted_text
 
 # ----------------- HANDLERS -----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -477,6 +516,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await render_admin_panel(query)
 
+    elif data == "admin_edit_welcome_ask":
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        context.user_data['mode'] = 'WAITING_WELCOME_TEXT'
+        current_text = get_welcome_text_db()
+        pesan = (
+            "📝 *EDIT DESKRIPSI START / REFRESH*\n"
+            "═══════════════════════\n"
+            "Silakan kirimkan teks deskripsi baru untuk pesan /start atau refresh.\n\n"
+            "💡 *Tips Tag Variabel Otomatis:*\n"
+            "• Gunakan `{first_name}` untuk menampilkan nama user.\n"
+            "• Gunakan `{pwd_str}` untuk menampilkan daftar password aktif.\n\n"
+            "📄 *Deskripsi Saat Ini:*\n"
+            f"```\n{current_text}\n```\n\n"
+            "_Kirim pesan berisi deskripsi baru sekarang..._"
+        )
+        await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
+
     elif data == "admin_export_all_deposits":
         if user.id != ADMIN_CHAT_ID:
             await query.answer("❌ Akses khusus Admin!", show_alert=True)
@@ -484,7 +543,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn = get_db()
         cursor = conn.cursor()
-        # Mengambil data selain REJECTED
         cursor.execute('''
             SELECT d.user_id, u.username, d.gmail, d.password, d.status, d.created_at 
             FROM deposits d 
@@ -516,7 +574,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 grouped_data[tanggal_str][user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': []}
             
             if status in grouped_data[tanggal_str][user_key]:
-                # Format ringkas: gmail:password | jam WIB
                 grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd} | {jam_str} WIB")
 
         txt_lines = []
@@ -535,7 +592,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tot_a = len(statuses_dict['APPROVED'])
                 tot_user = tot_p + tot_pr + tot_a
 
-                # Header user di atas saja
                 txt_lines.append(f"👤 USER: {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
                 
                 txt_lines.append(f"  • Gmail Pending (Belum Rekap) ({tot_p}) :")
@@ -1053,6 +1109,7 @@ async def render_admin_panel(query):
         keyboard.append([InlineKeyboardButton(f"🔑 Sandi [{pwd}]: {st_icon}", callback_data=f"admin_toggle_pwd_{pwd}")])
 
     keyboard.extend([
+        [InlineKeyboardButton("📝 Edit Deskripsi Start/Refresh", callback_data="admin_edit_welcome_ask")],
         [InlineKeyboardButton("⚙️ Kelola Setoran Gmail Active", callback_data="admin_setoran")],
         [InlineKeyboardButton("🔄 Auto Rekap Massal -> Processing", callback_data="global_paste_process_ask")],
         [InlineKeyboardButton("✅ Auto Approve Massal -> Approved", callback_data="global_paste_approve_ask")],
@@ -1205,6 +1262,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     raw_lines = cleaned_text.split('\n')
     lines = [line.strip() for line in raw_lines if line.strip()]
+
+    # --- PROSES SIMPAN DESKRIPSI WELCOME/START BARU ---
+    if current_mode == 'WAITING_WELCOME_TEXT':
+        if user.id != ADMIN_CHAT_ID:
+            return
+
+        new_text = raw_input_text.strip()
+        set_welcome_text_db(new_text)
+
+        context.user_data.clear()
+        await update.message.reply_text(
+            "✅ *DESKRIPSI START/REFRESH BERHASIL DIPERBARUI!*\n\n"
+            "Pesan sambutan baru akan langsung tampil saat user klik `/start` atau **🔄 Refresh / Start**.",
+            reply_markup=main_menu_keyboard(user.id),
+            parse_mode='Markdown'
+        )
+        return
 
     # --- PROSES BROADCAST PENGUMUMAN MASSAL ---
     if current_mode == 'WAITING_BROADCAST_TEXT':
@@ -1605,18 +1679,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         inserted_count = 0
         duplicate_count = 0
         successfully_inserted_accounts = []
-        seen_batch_emails = set() # Menolak duplikat dalam 1 kiriman teks
+        seen_batch_emails = set()
 
         for gmail, password in items_to_process:
             gmail_clean = gmail.strip().lower()
 
-            # Pengecekan 1: Cek duplikat dalam 1 kali kirim
             if gmail_clean in seen_batch_emails:
                 duplicate_count += 1
                 continue
             seen_batch_emails.add(gmail_clean)
 
-            # Pengecekan 2: Cek duplikat di SELURUH Database (Akurat dengan TRIM)
             cursor.execute('SELECT id FROM deposits WHERE TRIM(LOWER(gmail)) = TRIM(LOWER(%s))', (gmail_clean,))
             if cursor.fetchone():
                 duplicate_count += 1
@@ -1645,7 +1717,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             conn = get_db()
             cursor = conn.cursor()
-            # Ambil hanya yang statusnya bukan REJECTED
             cursor.execute("SELECT gmail, password, status, created_at FROM deposits WHERE user_id = %s AND status != 'REJECTED'", (user.id,))
             user_all_deposits = cursor.fetchall()
             cursor.close()
@@ -1657,7 +1728,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             for g, p, st, dt in user_all_deposits:
                 jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
-                # Keterangan jam ditaruh disamping password
                 formatted_item = f"{g}:{p} | {jam_str} WIB"
                 if st == 'PENDING':
                     pending_list.append(formatted_item)
@@ -1668,7 +1738,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             tgl_hari_ini = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
 
-            # Username cukup ditulis 1 kali di bagian atas (header)
             txt_lines = [
                 f"📅 TANGGAL SETOR: {tgl_hari_ini}",
                 f"👤 USER: {username_txt} (ID: {user.id})",
