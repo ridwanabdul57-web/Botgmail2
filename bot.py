@@ -515,9 +515,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_key not in grouped_data[tanggal_str]:
                 grouped_data[tanggal_str][user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': []}
             
-            u_tag = f"@{uname}" if uname else f"User_{uid}"
             if status in grouped_data[tanggal_str][user_key]:
-                grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd} | {jam_str} WIB | User: {u_tag}")
+                # Format ringkas: gmail:password | jam WIB
+                grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd} | {jam_str} WIB")
 
         txt_lines = []
         for tanggal, users_dict in grouped_data.items():
@@ -535,7 +535,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tot_a = len(statuses_dict['APPROVED'])
                 tot_user = tot_p + tot_pr + tot_a
 
-                txt_lines.append(f"👤 {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
+                # Header user di atas saja
+                txt_lines.append(f"👤 USER: {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
                 
                 txt_lines.append(f"  • Gmail Pending (Belum Rekap) ({tot_p}) :")
                 if statuses_dict['PENDING']:
@@ -1656,7 +1657,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             for g, p, st, dt in user_all_deposits:
                 jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
-                formatted_item = f"{g}:{p} | {jam_str} WIB | User: {username_txt}"
+                # Keterangan jam ditaruh disamping password
+                formatted_item = f"{g}:{p} | {jam_str} WIB"
                 if st == 'PENDING':
                     pending_list.append(formatted_item)
                 elif st == 'PROCESSING':
@@ -1666,6 +1668,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             tgl_hari_ini = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
 
+            # Username cukup ditulis 1 kali di bagian atas (header)
             txt_lines = [
                 f"📅 TANGGAL SETOR: {tgl_hari_ini}",
                 f"👤 USER: {username_txt} (ID: {user.id})",
