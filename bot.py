@@ -547,7 +547,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SELECT d.user_id, u.username, d.gmail, d.password, d.status, d.created_at 
             FROM deposits d 
             LEFT JOIN users u ON d.user_id = u.user_id 
-            WHERE d.status != 'REJECTED'
             ORDER BY d.created_at DESC, d.user_id DESC
         ''')
         all_deposits = cursor.fetchall()
@@ -555,7 +554,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         if not all_deposits:
-            await query.answer("⚠️ Belum ada riwayat setoran aktif di database.", show_alert=True)
+            await query.answer("⚠️ Belum ada riwayat setoran di database.", show_alert=True)
             return
 
         wib_now_date = datetime.now(timezone(timedelta(hours=7))).strftime('%Y%m%d_%H%M%S')
@@ -571,7 +570,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_key = (uid, uname)
             if user_key not in grouped_data[tanggal_str]:
-                grouped_data[tanggal_str][user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': []}
+                grouped_data[tanggal_str][user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': [], 'REJECTED': []}
             
             if status in grouped_data[tanggal_str][user_key]:
                 grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd} | {jam_str} WIB")
@@ -579,7 +578,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt_lines = []
         for tanggal, users_dict in grouped_data.items():
             total_akun_tanggal = sum(
-                len(s['PENDING']) + len(s['PROCESSING']) + len(s['APPROVED']) 
+                len(s['PENDING']) + len(s['PROCESSING']) + len(s['APPROVED']) + len(s['REJECTED'])
                 for s in users_dict.values()
             )
             txt_lines.append(f"📅 TANGGAL SETOR: {tanggal} (Total Akun: {total_akun_tanggal})")
@@ -590,7 +589,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tot_p = len(statuses_dict['PENDING'])
                 tot_pr = len(statuses_dict['PROCESSING'])
                 tot_a = len(statuses_dict['APPROVED'])
-                tot_user = tot_p + tot_pr + tot_a
+                tot_r = len(statuses_dict['REJECTED'])
+                tot_user = tot_p + tot_pr + tot_a + tot_r
 
                 txt_lines.append(f"👤 USER: {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
                 
@@ -614,12 +614,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         txt_lines.append(f"    {item}")
                 else:
                     txt_lines.append("    -")
+
+                txt_lines.append(f"  • Gmail Rejected ({tot_r}) :")
+                if statuses_dict['REJECTED']:
+                    for item in statuses_dict['REJECTED']:
+                        txt_lines.append(f"    {item}")
+                else:
+                    txt_lines.append("    -")
                 
                 txt_lines.append("--------------------------------------------------")
             txt_lines.append("\n")
 
         txt_lines.append("==================================================")
-        txt_lines.append(f"📊 KETERANGAN TOTAL AKUN AKTIF KESELURUHAN: {total_semua_akun} Akun")
+        txt_lines.append(f"📊 KETERANGAN TOTAL AKUN KESELURUHAN DATABASE: {total_semua_akun} Akun")
         txt_lines.append("==================================================")
 
         txt_content = "\n".join(txt_lines)
@@ -631,7 +638,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=user.id,
                 document=txt_file,
                 filename=filename,
-                caption=f"📁 *REKAP SETORAN TERSEPARASI REAL-TIME*\n• Total Akun Terdaftar: `{total_semua_akun}` Akun",
+                caption=f"📁 *REKAP SETORAN LENGKAP REAL-TIME*\n• Total Akun Terdaftar: `{total_semua_akun}` Akun",
                 parse_mode='Markdown'
             )
             await query.answer("✅ File rekap berhasil dikirim!", show_alert=False)
@@ -1642,7 +1649,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
-    # --- EKSTRAKSI & PEMERIKSAAN FORMAT YANG DITINGKATKAN (ANTI TEMBUS) ---
+    # --- EKSTRAKSI & PEMERIKSAAN FORMAT YANG DITINGKATKAN ---
     for line in lines:
         line_clean = line.strip()
         if not line_clean:
@@ -1717,7 +1724,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute("SELECT gmail, password, status, created_at FROM deposits WHERE user_id = %s AND status != 'REJECTED'", (user.id,))
+            # Ambil semua data setoran aktif (termasuk yang baru di-insert tanpa ada yang terlewat)
+            cursor.execute("SELECT gmail, password, status, created_at FROM deposits WHERE user_id = %s ORDER BY id ASC", (user.id,))
             user_all_deposits = cursor.fetchall()
             cursor.close()
             conn.close()
@@ -1725,6 +1733,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending_list = []
             proc_list = []
             approved_list = []
+            rejected_list = []
 
             for g, p, st, dt in user_all_deposits:
                 jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
@@ -1735,15 +1744,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     proc_list.append(formatted_item)
                 elif st == 'APPROVED':
                     approved_list.append(formatted_item)
+                elif st == 'REJECTED':
+                    rejected_list.append(formatted_item)
             
             tgl_hari_ini = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
 
             txt_lines = [
                 f"📅 TANGGAL SETOR: {tgl_hari_ini}",
                 f"👤 USER: {username_txt} (ID: {user.id})",
-                f"📦 TOTAL AKUN SETORAN HARI INI: {len(successfully_inserted_accounts)} Akun",
+                f"📦 TOTAL AKUN BARU SETOR: {inserted_count} Akun",
                 "--------------------------------------------------",
-                "Gmail Pending (Belum Rekap) :"
+                f"Gmail Pending (Belum Rekap) ({len(pending_list)}) :"
             ]
             if pending_list:
                 txt_lines.extend(pending_list)
@@ -1751,21 +1762,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 txt_lines.append("-")
 
             txt_lines.append("")
-            txt_lines.append("Gmail Processing (Sudah Rekap) :")
+            txt_lines.append(f"Gmail Processing (Sudah Rekap) ({len(proc_list)}) :")
             if proc_list:
                 txt_lines.extend(proc_list)
             else:
                 txt_lines.append("-")
 
             txt_lines.append("")
-            txt_lines.append("Gmail Approved (Saldo Masuk) :")
+            txt_lines.append(f"Gmail Approved (Saldo Masuk) ({len(approved_list)}) :")
             if approved_list:
                 txt_lines.extend(approved_list)
             else:
                 txt_lines.append("-")
 
+            txt_lines.append("")
+            txt_lines.append(f"Gmail Rejected ({len(rejected_list)}) :")
+            if rejected_list:
+                txt_lines.extend(rejected_list)
+            else:
+                txt_lines.append("-")
+
             txt_lines.append("--------------------------------------------------")
-            txt_lines.append(f"📊 KETERANGAN TOTAL AKUN AKTIF USER TERBARU: {len(user_all_deposits)} Akun")
+            txt_lines.append(f"📊 TOTAL KESELURUHAN SETORAN USER DI DATABASE: {len(user_all_deposits)} Akun")
 
             txt_content = "\n".join(txt_lines)
             txt_file = io.BytesIO(txt_content.encode('utf-8'))
@@ -1779,7 +1797,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👤 *User:* {user.first_name} ({username_txt})\n"
                 f"📦 *Akun Baru Masuk:* `{inserted_count}` Akun\n"
                 f"═══════════════════════\n"
-                f"📄 *File .txt di atas berisi rekap lengkap & realtime WIB.*"
+                f"📄 *File .txt di atas berisi seluruh daftar setoran aktif & riwayat lengkap user tanpa ada yang hilang.*"
             )
 
             try:
