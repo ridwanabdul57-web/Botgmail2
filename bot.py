@@ -94,7 +94,6 @@ def init_db():
         )
     ''')
     
-    # Tambah kolom price jika belum ada di tabel deposits
     try:
         cursor.execute("ALTER TABLE deposits ADD COLUMN price BIGINT DEFAULT 4000")
     except Exception:
@@ -138,7 +137,6 @@ def init_db():
     conn.close()
 
 def get_all_passwords_info():
-    """Mengembalikan dict: {pwd: {'status': status, 'price': harga}}"""
     pass_info = {}
     try:
         conn = get_db()
@@ -175,7 +173,6 @@ def set_password_price(password: str, price: int):
     conn.close()
 
 def get_active_passwords():
-    """Mengembalikan dict password aktif beserta harganya: {pwd: price}"""
     info = get_all_passwords_info()
     return {pwd: data['price'] for pwd, data in info.items() if data['status'] == 'ACTIVE'}
 
@@ -201,6 +198,65 @@ def set_welcome_text_db(text: str):
     cursor.close()
     conn.close()
 
+# Helper fungsi untuk menghasilkan rekap file .txt realtime tanpa ada data yang terlewat
+def generate_user_txt_rekap(target_uid, username_txt):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT gmail, password, status, created_at, price FROM deposits WHERE user_id = %s ORDER BY id ASC", (target_uid,))
+    user_all_deposits = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    pending_list = []
+    proc_list = []
+    approved_list = []
+    rejected_list = []
+
+    for g, p, st, dt, pr in user_all_deposits:
+        jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
+        pr_val = pr if pr else 4000
+        formatted_item = f"{g}:{p} (Rp {pr_val:,}) | {jam_str} WIB"
+        if st == 'PENDING':
+            pending_list.append(formatted_item)
+        elif st == 'PROCESSING':
+            proc_list.append(formatted_item)
+        elif st == 'APPROVED':
+            approved_list.append(formatted_item)
+        elif st == 'REJECTED':
+            rejected_list.append(formatted_item)
+
+    tgl_hari_ini = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
+
+    txt_lines = [
+        f"📅 TANGGAL SETOR: {tgl_hari_ini}",
+        f"👤 USER: {username_txt} (ID: {target_uid})",
+        f"📦 TOTAL AKUN SETORAN USER: {len(user_all_deposits)} Akun",
+        "--------------------------------------------------",
+        f"Gmail Pending (Belum Rekap) ({len(pending_list)}) :"
+    ]
+    txt_lines.extend(pending_list if pending_list else ["-"])
+
+    txt_lines.append("")
+    txt_lines.append(f"Gmail Processing (Sudah Rekap) ({len(proc_list)}) :")
+    txt_lines.extend(proc_list if proc_list else ["-"])
+
+    txt_lines.append("")
+    txt_lines.append(f"Gmail Approved (Saldo Masuk) ({len(approved_list)}) :")
+    txt_lines.extend(approved_list if approved_list else ["-"])
+
+    txt_lines.append("")
+    txt_lines.append(f"Gmail Rejected ({len(rejected_list)}) :")
+    txt_lines.extend(rejected_list if rejected_list else ["-"])
+
+    txt_lines.append("--------------------------------------------------")
+    txt_lines.append(f"📊 TOTAL KESELURUHAN SETORAN USER DI DATABASE: {len(user_all_deposits)} Akun")
+
+    txt_content = "\n".join(txt_lines)
+    txt_file = io.BytesIO(txt_content.encode('utf-8'))
+    timestamp_file = datetime.now(timezone(timedelta(hours=7))).strftime("%Y%m%d_%H%M%S")
+    filename = f"setoran_{target_uid}_{timestamp_file}.txt"
+    return txt_file, filename
+
 # ----------------- KEYBOARD MENUS -----------------
 def persistent_reply_keyboard():
     keyboard = [
@@ -212,7 +268,6 @@ def persistent_reply_keyboard():
 def main_menu_keyboard(user_id):
     active_pwds = get_active_passwords()
     
-    # Apabila stock overload / password tidak ada yang aktif
     if not active_pwds:
         keyboard = [
             [
@@ -378,7 +433,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'PENDING'", (user.id,))
         pen_count = cursor.fetchone()[0]
 
-        # Hitung estimasi saldo tertahan berbasis harga masing-masing deposit
         cursor.execute("SELECT COALESCE(SUM(price), 0) FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (user.id,))
         estimasi_pending = cursor.fetchone()[0]
 
@@ -658,32 +712,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 txt_lines.append(f"👤 USER: {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
                 
                 txt_lines.append(f"  • Gmail Pending (Belum Rekap) ({tot_p}) :")
-                if statuses_dict['PENDING']:
-                    for item in statuses_dict['PENDING']:
-                        txt_lines.append(f"    {item}")
-                else:
-                    txt_lines.append("    -")
+                txt_lines.extend([f"    {item}" for item in statuses_dict['PENDING']] if statuses_dict['PENDING'] else ["    -"])
                 
                 txt_lines.append(f"  • Gmail Processing (Sudah Rekap) ({tot_pr}) :")
-                if statuses_dict['PROCESSING']:
-                    for item in statuses_dict['PROCESSING']:
-                        txt_lines.append(f"    {item}")
-                else:
-                    txt_lines.append("    -")
+                txt_lines.extend([f"    {item}" for item in statuses_dict['PROCESSING']] if statuses_dict['PROCESSING'] else ["    -"])
 
                 txt_lines.append(f"  • Gmail Approved (Saldo Masuk) ({tot_a}) :")
-                if statuses_dict['APPROVED']:
-                    for item in statuses_dict['APPROVED']:
-                        txt_lines.append(f"    {item}")
-                else:
-                    txt_lines.append("    -")
+                txt_lines.extend([f"    {item}" for item in statuses_dict['APPROVED']] if statuses_dict['APPROVED'] else ["    -"])
 
                 txt_lines.append(f"  • Gmail Rejected ({tot_r}) :")
-                if statuses_dict['REJECTED']:
-                    for item in statuses_dict['REJECTED']:
-                        txt_lines.append(f"    {item}")
-                else:
-                    txt_lines.append("    -")
+                txt_lines.extend([f"    {item}" for item in statuses_dict['REJECTED']] if statuses_dict['REJECTED'] else ["    -"])
                 
                 txt_lines.append("--------------------------------------------------")
             txt_lines.append("\n")
@@ -890,7 +928,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (target_uid,))
+        # Mengambil SEMUA deposit milik user agar aksi centang menyeluruh
+        cursor.execute("SELECT id FROM deposits WHERE user_id = %s", (target_uid,))
         all_items = [row[0] for row in cursor.fetchall()]
         cursor.close()
         conn.close()
@@ -921,14 +960,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         placeholders = ','.join(['%s'] * len(selected_deps))
         cursor.execute(f"UPDATE deposits SET status = 'PROCESSING' WHERE id IN ({placeholders})", tuple(selected_deps))
         conn.commit()
+        
+        cursor.execute("SELECT username FROM users WHERE user_id = %s", (target_uid,))
+        u_res = cursor.fetchone()
+        uname = u_res[0] if u_res else None
         cursor.close()
         conn.close()
 
         count = len(selected_deps)
         context.user_data['selected_deps'] = []
 
+        # Kirim File .TXT Realtime Ter-update ke Admin
+        u_text = f"@{uname}" if uname else f"User_{target_uid}"
+        txt_file, filename = generate_user_txt_rekap(target_uid, u_text)
+        
+        await context.bot.send_document(
+            chat_id=user.id,
+            document=txt_file,
+            filename=filename,
+            caption=f"📄 *REKAP UPDATE REALTIME (PROCESSING)*\n• User: {u_text}\n• Total akun diupdate: `{count}` akun."
+        )
+
         await query.edit_message_text(
-            f"🔄 *REKAP (PROCESSING) TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` diubah statusnya menjadi PROCESSING (Sudah Rekap).",
+            f"🔄 *REKAP (PROCESSING) TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` diubah statusnya menjadi PROCESSING (Sudah Rekap).\nFile rekap .txt realtime telah dikirimkan ke chat.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]),
             parse_mode='Markdown'
         )
@@ -958,7 +1012,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor = conn.cursor()
         
         placeholders = ','.join(['%s'] * len(selected_deps))
-        # Ambil total harga spesifik dari akun-akun yang di-approve
         cursor.execute(f"SELECT COALESCE(SUM(price), 0) FROM deposits WHERE id IN ({placeholders})", tuple(selected_deps))
         total_added = cursor.fetchone()[0]
 
@@ -966,13 +1019,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         count = len(selected_deps)
         cursor.execute('UPDATE users SET balance = balance + %s WHERE user_id = %s', (total_added, target_uid))
+        
+        cursor.execute("SELECT username FROM users WHERE user_id = %s", (target_uid,))
+        u_res = cursor.fetchone()
+        uname = u_res[0] if u_res else None
+        
         conn.commit()
         cursor.close()
         conn.close()
 
         context.user_data['selected_deps'] = []
+
+        # Kirim File .TXT Realtime Ter-update ke Admin
+        u_text = f"@{uname}" if uname else f"User_{target_uid}"
+        txt_file, filename = generate_user_txt_rekap(target_uid, u_text)
+        
+        await context.bot.send_document(
+            chat_id=user.id,
+            document=txt_file,
+            filename=filename,
+            caption=f"📄 *REKAP UPDATE REALTIME (APPROVED)*\n• User: {u_text}\n• Total akun disetujui: `{count}` akun."
+        )
+
         await query.edit_message_text(
-            f"✅ *APPROVE TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` telah disetujui.\nSaldo +Rp {total_added:,} telah dikreditkan.",
+            f"✅ *APPROVE TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` telah disetujui.\nSaldo +Rp {total_added:,} telah dikreditkan.\nFile rekap .txt realtime telah dikirimkan ke chat.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]),
             parse_mode='Markdown'
         )
@@ -1027,6 +1097,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rejected_emails = [row[0] for row in cursor.fetchall()]
 
         cursor.execute(f"UPDATE deposits SET status = 'REJECTED' WHERE id IN ({placeholders})", tuple(selected_deps))
+        
+        cursor.execute("SELECT username FROM users WHERE user_id = %s", (target_uid,))
+        u_res = cursor.fetchone()
+        uname = u_res[0] if u_res else None
+
         conn.commit()
         cursor.close()
         conn.close()
@@ -1034,8 +1109,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = len(selected_deps)
         context.user_data['selected_deps'] = []
 
+        # Kirim File .TXT Realtime Ter-update ke Admin
+        u_text = f"@{uname}" if uname else f"User_{target_uid}"
+        txt_file, filename = generate_user_txt_rekap(target_uid, u_text)
+
+        await context.bot.send_document(
+            chat_id=user.id,
+            document=txt_file,
+            filename=filename,
+            caption=f"📄 *REKAP UPDATE REALTIME (REJECTED)*\n• User: {u_text}\n• Total akun ditolak: `{count}` akun."
+        )
+
         await query.edit_message_text(
-            f"❌ *REJECT TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` telah ditolak.\n📌 *Alasan:* {chosen_reason}",
+            f"❌ *REJECT TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` telah ditolak.\n📌 *Alasan:* {chosen_reason}\nFile rekap .txt realtime telah dikirimkan ke chat.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]),
             parse_mode='Markdown'
         )
@@ -1193,11 +1279,11 @@ async def render_admin_users_list(query, page=1):
     conn = get_db()
     cursor = conn.cursor()
     
+    # KUNCI PERBAIKAN: Menampilkan SEMUA user yang pernah menyetor agar data riwayat tidak hilang
     cursor.execute('''
         SELECT d.user_id, u.username, COUNT(d.id) AS active_count
         FROM deposits d
         LEFT JOIN users u ON d.user_id = u.user_id
-        WHERE d.status IN ('PENDING', 'PROCESSING')
         GROUP BY d.user_id, u.username
         ORDER BY active_count DESC
     ''')
@@ -1207,7 +1293,7 @@ async def render_admin_users_list(query, page=1):
 
     if not user_list:
         await query.edit_message_text(
-            "✅ *Tidak ada setoran pending atau processing saat ini.*",
+            "✅ *Tidak ada data setoran saat ini.*",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Panel Admin", callback_data="admin_panel")]]),
             parse_mode='Markdown'
         )
@@ -1224,7 +1310,7 @@ async def render_admin_users_list(query, page=1):
     keyboard = []
     for target_uid, uname, cnt in current_page_users:
         u_text = f"@{uname}" if uname else f"ID: {target_uid}"
-        keyboard.append([InlineKeyboardButton(f"👤 {u_text} ({cnt} Akun Active)", callback_data=f"admuser_{target_uid}_1")])
+        keyboard.append([InlineKeyboardButton(f"👤 {u_text} ({cnt} Akun Total)", callback_data=f"admuser_{target_uid}_1")])
 
     nav_buttons = []
     if page > 1:
@@ -1242,8 +1328,8 @@ async def render_admin_users_list(query, page=1):
     pesan = (
         f"⚙️ *PANEL ADMIN - KELOLA SETORAN UNTUK VERIFIKASI*\n"
         f"═══════════════════════\n"
-        f"👥 *Total User Aktif:* `{total_users}` User\n"
-        f"📦 *Total Akun Aktif:* `{total_active_all_accounts}` Akun\n"
+        f"👥 *Total User Terdaftar:* `{total_users}` User\n"
+        f"📦 *Total Seluruh Akun:* `{total_active_all_accounts}` Akun\n"
         f"📖 *Halaman:* {page} dari {total_pages}\n"
         f"═══════════════════════\n"
         f"Pilih user di bawah ini untuk melihat dan mengelola status akun:"
@@ -1253,13 +1339,14 @@ async def render_admin_users_list(query, page=1):
 async def render_admin_user_deposits(query, target_uid, context, page=1):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, gmail, password, status, created_at, price FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING') ORDER BY id DESC", (target_uid,))
+    # KUNCI PERBAIKAN: Menampilkan SEMUA status deposit milik user agar data realtime lengkap 100%
+    cursor.execute("SELECT id, gmail, password, status, created_at, price FROM deposits WHERE user_id = %s ORDER BY id DESC", (target_uid,))
     items = cursor.fetchall()
     cursor.close()
     conn.close()
 
     if not items:
-        await query.edit_message_text("✅ *Tidak ada setoran aktif (Pending/Processing) untuk user ini.*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]), parse_mode='Markdown')
+        await query.edit_message_text("✅ *Tidak ada setoran untuk user ini.*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]), parse_mode='Markdown')
         return
 
     total_items = len(items)
@@ -1285,7 +1372,15 @@ async def render_admin_user_deposits(query, target_uid, context, page=1):
     for dep_id, g_mail, p_ass, st, dt, pr in current_page_items:
         is_checked = dep_id in selected_deps
         check_icon = "✅ [PILIH]" if is_checked else "⬜ [   ]"
-        st_tag = "⏳ PENDING" if st == 'PENDING' else "🔄 PROC"
+        
+        st_tag = "⏳ PENDING"
+        if st == 'PROCESSING':
+            st_tag = "🔄 PROC"
+        elif st == 'APPROVED':
+            st_tag = "✅ APP"
+        elif st == 'REJECTED':
+            st_tag = "❌ REJ"
+
         pr_val = pr if pr else 4000
         
         pesan += f"{check_icon} `{g_mail}` | `{p_ass}` (Rp {pr_val:,}) ({st_tag})\n"
@@ -1862,7 +1957,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         inserted_count = 0
         duplicate_count = 0
         total_batch_price = 0
-        successfully_inserted_accounts = []
         seen_batch_emails = set()
 
         for gmail, password, price_val in items_to_process:
@@ -1885,7 +1979,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                (user.id, gmail_clean, password, now_str, price_val))
                 inserted_count += 1
                 total_batch_price += price_val
-                successfully_inserted_accounts.append((gmail_clean, password, now_str, price_val))
             except psycopg2.IntegrityError:
                 conn.rollback()
                 duplicate_count += 1
@@ -1901,74 +1994,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username_txt = f"@{user.username}" if user.username else f"User_{user.id}"
             mode_label = "BULKING" if is_bulking_mode else "SATUAN"
             
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT gmail, password, status, created_at, price FROM deposits WHERE user_id = %s ORDER BY id ASC", (user.id,))
-            user_all_deposits = cursor.fetchall()
-            cursor.close()
-            conn.close()
-
-            pending_list = []
-            proc_list = []
-            approved_list = []
-            rejected_list = []
-
-            for g, p, st, dt, pr in user_all_deposits:
-                jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
-                pr_val = pr if pr else 4000
-                formatted_item = f"{g}:{p} (Rp {pr_val:,}) | {jam_str} WIB"
-                if st == 'PENDING':
-                    pending_list.append(formatted_item)
-                elif st == 'PROCESSING':
-                    proc_list.append(formatted_item)
-                elif st == 'APPROVED':
-                    approved_list.append(formatted_item)
-                elif st == 'REJECTED':
-                    rejected_list.append(formatted_item)
-            
-            tgl_hari_ini = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
-
-            txt_lines = [
-                f"📅 TANGGAL SETOR: {tgl_hari_ini}",
-                f"👤 USER: {username_txt} (ID: {user.id})",
-                f"📦 TOTAL AKUN BARU SETOR: {inserted_count} Akun",
-                "--------------------------------------------------",
-                f"Gmail Pending (Belum Rekap) ({len(pending_list)}) :"
-            ]
-            if pending_list:
-                txt_lines.extend(pending_list)
-            else:
-                txt_lines.append("-")
-
-            txt_lines.append("")
-            txt_lines.append(f"Gmail Processing (Sudah Rekap) ({len(proc_list)}) :")
-            if proc_list:
-                txt_lines.extend(proc_list)
-            else:
-                txt_lines.append("-")
-
-            txt_lines.append("")
-            txt_lines.append(f"Gmail Approved (Saldo Masuk) ({len(approved_list)}) :")
-            if approved_list:
-                txt_lines.extend(approved_list)
-            else:
-                txt_lines.append("-")
-
-            txt_lines.append("")
-            txt_lines.append(f"Gmail Rejected ({len(rejected_list)}) :")
-            if rejected_list:
-                txt_lines.extend(rejected_list)
-            else:
-                txt_lines.append("-")
-
-            txt_lines.append("--------------------------------------------------")
-            txt_lines.append(f"📊 TOTAL KESELURUHAN SETORAN USER DI DATABASE: {len(user_all_deposits)} Akun")
-
-            txt_content = "\n".join(txt_lines)
-            txt_file = io.BytesIO(txt_content.encode('utf-8'))
-            
-            timestamp_file = datetime.now(timezone(timedelta(hours=7))).strftime("%Y%m%d_%H%M%S")
-            filename = f"setoran_{user.id}_{timestamp_file}.txt"
+            # Gunakan fungsi generator .txt realtime agar seluruh data lengkap tanpa ada yang hilang
+            txt_file, filename = generate_user_txt_rekap(user.id, username_txt)
 
             laporan_admin_text = (
                 f"📥 *SETORAN {mode_label} BARU MASUK*\n"
