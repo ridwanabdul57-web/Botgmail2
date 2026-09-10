@@ -136,6 +136,18 @@ def init_db():
     cursor.close()
     conn.close()
 
+def delete_rejected_deposits():
+    """Menghapus semua akun berstatus REJECTED dari database."""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM deposits WHERE status = 'REJECTED'")
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"Error deleting rejected deposits: {e}")
+
 def get_all_passwords_info():
     pass_info = {}
     try:
@@ -210,7 +222,6 @@ def generate_user_txt_rekap(target_uid, username_txt):
     pending_list = []
     proc_list = []
     approved_list = []
-    rejected_list = []
 
     for g, p, st, dt, pr in user_all_deposits:
         jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
@@ -222,8 +233,6 @@ def generate_user_txt_rekap(target_uid, username_txt):
             proc_list.append(formatted_item)
         elif st == 'APPROVED':
             approved_list.append(formatted_item)
-        elif st == 'REJECTED':
-            rejected_list.append(formatted_item)
 
     tgl_hari_ini = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
 
@@ -243,10 +252,6 @@ def generate_user_txt_rekap(target_uid, username_txt):
     txt_lines.append("")
     txt_lines.append(f"Gmail Approved (Saldo Masuk) ({len(approved_list)}) :")
     txt_lines.extend(approved_list if approved_list else ["-"])
-
-    txt_lines.append("")
-    txt_lines.append(f"Gmail Rejected ({len(rejected_list)}) :")
-    txt_lines.extend(rejected_list if rejected_list else ["-"])
 
     txt_lines.append("--------------------------------------------------")
     txt_lines.append(f"📊 TOTAL KESELURUHAN SETORAN USER DI DATABASE: {len(user_all_deposits)} Akun")
@@ -475,8 +480,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     status_icon = "🔄 PROCESSING (Sudah Rekap)"
                 elif st == "APPROVED":
                     status_icon = "✅ APPROVED (Saldo Masuk)"
-                elif st == "REJECTED":
-                    status_icon = "❌ REJECTED"
                 
                 waktu = dt if dt else get_wib_time()
                 harga_str = f"Rp {pr:,}" if pr else "Rp 4.000"
@@ -663,7 +666,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SELECT d.user_id, u.username, d.gmail, d.password, d.status, d.created_at, d.price
             FROM deposits d 
             LEFT JOIN users u ON d.user_id = u.user_id 
-            ORDER BY d.created_at DESC, d.user_id DESC
+            ORDER BY d.user_id DESC, d.id ASC
         ''')
         all_deposits = cursor.fetchall()
         cursor.close()
@@ -674,59 +677,44 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         wib_now_date = datetime.now(timezone(timedelta(hours=7))).strftime('%Y%m%d_%H%M%S')
-        grouped_data = {}
+        user_grouped_data = {}
         total_semua_akun = len(all_deposits)
 
         for uid, uname, gmail, pwd, status, dt, pr in all_deposits:
-            tanggal_str = dt.split()[0] if dt and len(dt.split()) > 0 else datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
             jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
             pr_val = pr if pr else 4000
             
-            if tanggal_str not in grouped_data:
-                grouped_data[tanggal_str] = {}
-            
             user_key = (uid, uname)
-            if user_key not in grouped_data[tanggal_str]:
-                grouped_data[tanggal_str][user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': [], 'REJECTED': []}
+            if user_key not in user_grouped_data:
+                user_grouped_data[user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': []}
             
-            if status in grouped_data[tanggal_str][user_key]:
-                grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd} (Rp {pr_val:,}) | {jam_str} WIB")
+            if status in user_grouped_data[user_key]:
+                user_grouped_data[user_key][status].append(f"{gmail}:{pwd} (Rp {pr_val:,}) | {jam_str} WIB")
 
-        txt_lines = []
-        for tanggal, users_dict in grouped_data.items():
-            total_akun_tanggal = sum(
-                len(s['PENDING']) + len(s['PROCESSING']) + len(s['APPROVED']) + len(s['REJECTED'])
-                for s in users_dict.values()
-            )
-            txt_lines.append(f"📅 TANGGAL SETOR: {tanggal} (Total Akun: {total_akun_tanggal})")
-            txt_lines.append("="*50)
+        tgl_sekarang = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
+        txt_lines = [f"📅 REKAP REALTIME DATABASE SETORAN - {tgl_sekarang}\n"]
+
+        for (uid, uname), statuses_dict in user_grouped_data.items():
+            u_tag = f"@{uname}" if uname else f"User_{uid}"
+            tot_p = len(statuses_dict['PENDING'])
+            tot_pr = len(statuses_dict['PROCESSING'])
+            tot_a = len(statuses_dict['APPROVED'])
+            tot_user = tot_p + tot_pr + tot_a
+
+            txt_lines.append(f"👤 USER: {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
             
-            for (uid, uname), statuses_dict in users_dict.items():
-                u_tag = f"@{uname}" if uname else f"User_{uid}"
-                tot_p = len(statuses_dict['PENDING'])
-                tot_pr = len(statuses_dict['PROCESSING'])
-                tot_a = len(statuses_dict['APPROVED'])
-                tot_r = len(statuses_dict['REJECTED'])
-                tot_user = tot_p + tot_pr + tot_a + tot_r
+            txt_lines.append(f"  • Gmail Pending (Belum Rekap) ({tot_p}) :")
+            txt_lines.extend([f"    {item}" for item in statuses_dict['PENDING']] if statuses_dict['PENDING'] else ["    -"])
+            
+            txt_lines.append(f"  • Gmail Processing (Sudah Rekap) ({tot_pr}) :")
+            txt_lines.extend([f"    {item}" for item in statuses_dict['PROCESSING']] if statuses_dict['PROCESSING'] else ["    -"])
 
-                txt_lines.append(f"👤 USER: {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
-                
-                txt_lines.append(f"  • Gmail Pending (Belum Rekap) ({tot_p}) :")
-                txt_lines.extend([f"    {item}" for item in statuses_dict['PENDING']] if statuses_dict['PENDING'] else ["    -"])
-                
-                txt_lines.append(f"  • Gmail Processing (Sudah Rekap) ({tot_pr}) :")
-                txt_lines.extend([f"    {item}" for item in statuses_dict['PROCESSING']] if statuses_dict['PROCESSING'] else ["    -"])
+            txt_lines.append(f"  • Gmail Approved (Saldo Masuk) ({tot_a}) :")
+            txt_lines.extend([f"    {item}" for item in statuses_dict['APPROVED']] if statuses_dict['APPROVED'] else ["    -"])
+            
+            txt_lines.append("--------------------------------------------------")
 
-                txt_lines.append(f"  • Gmail Approved (Saldo Masuk) ({tot_a}) :")
-                txt_lines.extend([f"    {item}" for item in statuses_dict['APPROVED']] if statuses_dict['APPROVED'] else ["    -"])
-
-                txt_lines.append(f"  • Gmail Rejected ({tot_r}) :")
-                txt_lines.extend([f"    {item}" for item in statuses_dict['REJECTED']] if statuses_dict['REJECTED'] else ["    -"])
-                
-                txt_lines.append("--------------------------------------------------")
-            txt_lines.append("\n")
-
-        txt_lines.append("==================================================")
+        txt_lines.append("\n==================================================")
         txt_lines.append(f"📊 KETERANGAN TOTAL AKUN KESELURUHAN DATABASE: {total_semua_akun} Akun")
         txt_lines.append("==================================================")
 
@@ -928,7 +916,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn = get_db()
         cursor = conn.cursor()
-        # Mengambil SEMUA deposit milik user agar aksi centang menyeluruh
         cursor.execute("SELECT id FROM deposits WHERE user_id = %s", (target_uid,))
         all_items = [row[0] for row in cursor.fetchall()]
         cursor.close()
@@ -970,7 +957,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = len(selected_deps)
         context.user_data['selected_deps'] = []
 
-        # Kirim File .TXT Realtime Ter-update ke Admin
         u_text = f"@{uname}" if uname else f"User_{target_uid}"
         txt_file, filename = generate_user_txt_rekap(target_uid, u_text)
         
@@ -1030,7 +1016,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['selected_deps'] = []
 
-        # Kirim File .TXT Realtime Ter-update ke Admin
         u_text = f"@{uname}" if uname else f"User_{target_uid}"
         txt_file, filename = generate_user_txt_rekap(target_uid, u_text)
         
@@ -1109,7 +1094,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = len(selected_deps)
         context.user_data['selected_deps'] = []
 
-        # Kirim File .TXT Realtime Ter-update ke Admin
+        delete_rejected_deposits()
+
         u_text = f"@{uname}" if uname else f"User_{target_uid}"
         txt_file, filename = generate_user_txt_rekap(target_uid, u_text)
 
@@ -1117,11 +1103,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=user.id,
             document=txt_file,
             filename=filename,
-            caption=f"📄 *REKAP UPDATE REALTIME (REJECTED)*\n• User: {u_text}\n• Total akun ditolak: `{count}` akun."
+            caption=f"📄 *REKAP UPDATE REALTIME (REJECTED & DELETED)*\n• User: {u_text}\n• Total akun ditolak dan dihapus dari DB: `{count}` akun."
         )
 
         await query.edit_message_text(
-            f"❌ *REJECT TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` telah ditolak.\n📌 *Alasan:* {chosen_reason}\nFile rekap .txt realtime telah dikirimkan ke chat.",
+            f"❌ *REJECT TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` telah ditolak dan dihapus dari database.\n📌 *Alasan:* {chosen_reason}\nFile rekap .txt realtime telah dikirimkan ke chat.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]),
             parse_mode='Markdown'
         )
@@ -1279,7 +1265,6 @@ async def render_admin_users_list(query, page=1):
     conn = get_db()
     cursor = conn.cursor()
     
-    # KUNCI PERBAIKAN: Menampilkan SEMUA user yang pernah menyetor agar data riwayat tidak hilang
     cursor.execute('''
         SELECT d.user_id, u.username, COUNT(d.id) AS active_count
         FROM deposits d
@@ -1339,7 +1324,6 @@ async def render_admin_users_list(query, page=1):
 async def render_admin_user_deposits(query, target_uid, context, page=1):
     conn = get_db()
     cursor = conn.cursor()
-    # KUNCI PERBAIKAN: Menampilkan SEMUA status deposit milik user agar data realtime lengkap 100%
     cursor.execute("SELECT id, gmail, password, status, created_at, price FROM deposits WHERE user_id = %s ORDER BY id DESC", (target_uid,))
     items = cursor.fetchall()
     cursor.close()
@@ -1378,8 +1362,6 @@ async def render_admin_user_deposits(query, target_uid, context, page=1):
             st_tag = "🔄 PROC"
         elif st == 'APPROVED':
             st_tag = "✅ APP"
-        elif st == 'REJECTED':
-            st_tag = "❌ REJ"
 
         pr_val = pr if pr else 4000
         
@@ -1455,8 +1437,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     status_icon = "🔄 PROCESSING (Sudah Rekap)"
                 elif st == "APPROVED":
                     status_icon = "✅ APPROVED (Saldo Masuk)"
-                elif st == "REJECTED":
-                    status_icon = "❌ REJECTED"
                 
                 waktu = dt if dt else get_wib_time()
                 harga_str = f"Rp {pr:,}" if pr else "Rp 4.000"
@@ -1709,6 +1689,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
+        delete_rejected_deposits()
+
         for target_uid, emails in user_notif_map.items():
             try:
                 email_list_str = "\n".join([f"• `{e}`" for e in emails])
@@ -1731,7 +1713,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         await update.message.reply_text(
             f"✅ *AUTO REJECT MASSAL GLOBAL BERHASIL!*\n\n"
-            f"• Berhasil di-reject & dinotifikasi: `{success_count}` akun dari `{len(user_notif_map)}` user\n"
+            f"• Berhasil di-reject, dihapus dari DB & dinotifikasi: `{success_count}` akun dari `{len(user_notif_map)}` user\n"
             f"• Tidak cocok / bukan status aktif: `{not_found_count}` akun\n"
             f"• Alasan: {chosen_reason}",
             reply_markup=main_menu_keyboard(user.id),
@@ -1994,7 +1976,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username_txt = f"@{user.username}" if user.username else f"User_{user.id}"
             mode_label = "BULKING" if is_bulking_mode else "SATUAN"
             
-            # Gunakan fungsi generator .txt realtime agar seluruh data lengkap tanpa ada yang hilang
             txt_file, filename = generate_user_txt_rekap(user.id, username_txt)
 
             laporan_admin_text = (
@@ -2068,6 +2049,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application):
     init_db()
+    delete_rejected_deposits()
     await application.bot.set_my_commands([
         BotCommand("start", "🔄 Tampilkan Menu Utama / Refresh Bot")
     ])
