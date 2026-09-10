@@ -11,7 +11,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8966364905:AAEJKwW7MFa7rV0oI53gtxKUZEiuTHp0_5M')
 ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', 8359903974))
 CS_USERNAME = 'bossgmailbotcs'
-HARGA_PER_GMAIL = 4000
 MAX_BULK_LIMIT = 50
 ITEMS_PER_PAGE_USERS = 5   # Jumlah user per slide halaman admin
 ITEMS_PER_PAGE_DEPS = 10   # Jumlah akun per slide halaman verifikasi user
@@ -20,11 +19,10 @@ DEFAULT_WELCOME_TEXT = (
     "✨ *SELAMAT DATANG DI BOT SETORAN GMAIL V30* ✨\n"
     "Halo *{first_name}*! Silakan baca informasi & aturan setoran di bawah ini:\n\n"
     "💵 *INFORMASI RATE & PROSES*\n"
-    "• *Rate Per Akun:* Rp 4.000\n"
     "• *Estimasi Pengecekan:* 24 - 48 Jam Kerja\n"
     "• *Batas Bulking:* Maksimal 50 akun / setor\n\n"
-    "🔑 *ATURAN KATA SANDI (PASSWORD AKTIF)*\n"
-    "• Password yang valid hari ini: {pwd_str}\n\n"
+    "🔑 *ATURAN KATA SANDI & HARGA AKTIF*\n"
+    "{pwd_str}\n\n"
     "⚠️ *SYARAT & KETENTUAN WAJIB*\n"
     "1. *Dilarang Double-Sell:* Dilarang keras menyetor Gmail duplikat yang sudah pernah terdaftar di bot.\n"
     "2. *Nomor HP Pemulihan:* Wajib dikosongkan / jangan diverifikasi.\n"
@@ -32,15 +30,26 @@ DEFAULT_WELCOME_TEXT = (
     "👇 *Pilih menu di bawah ini untuk memulai:*"
 )
 
+OVERLOAD_WELCOME_TEXT = (
+    "⛔ *INFORMASI SETORAN DITUTUP SEMENTARA* ⛔\n"
+    "Halo *{first_name}*!\n\n"
+    "📢 *Mohon maaf, saat ini bot sedang tidak menerima setoran dikarenakan stock sedang OVERLOAD.*\n\n"
+    "ℹ️ *Catatan Penting:*\n"
+    "• Proses *Withdrawal (Penarikan Dana)* tetap berjalan normal.\n"
+    "• Akun yang *sudah disetorkan sebelumnya* akan tetap diproses dan di-approve oleh admin.\n\n"
+    "Silakan cek berkala menu ini untuk melihat update dibukanya kembali setoran."
+)
+
 def get_wib_time():
     wib_timezone = timezone(timedelta(hours=7))
     return datetime.now(wib_timezone).strftime("%d-%m-%Y %H:%M:%S WIB")
 
+# Default Password: Password -> (Status, Harga Default)
 DEFAULT_MASTER_PASSWORDS = {
-    'fineirga': 'ACTIVE',
-    'sgsg1122': 'ACTIVE',
-    'prabujaya': 'ACTIVE',
-    'selaras9': 'ACTIVE'
+    'fineirga': ('ACTIVE', 4000),
+    'sgsg1122': ('ACTIVE', 4000),
+    'prabujaya': ('ACTIVE', 4000),
+    'selaras9': ('ACTIVE', 4000)
 }
 
 REJECT_REASONS = [
@@ -80,10 +89,18 @@ def init_db():
             gmail TEXT UNIQUE,
             password TEXT,
             status TEXT DEFAULT 'PENDING',
-            created_at TEXT
+            created_at TEXT,
+            price BIGINT DEFAULT 4000
         )
     ''')
     
+    # Tambah kolom price jika belum ada di tabel deposits
+    try:
+        cursor.execute("ALTER TABLE deposits ADD COLUMN price BIGINT DEFAULT 4000")
+    except Exception:
+        conn.rollback()
+        cursor = conn.cursor()
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS withdrawals (
             id SERIAL PRIMARY KEY,
@@ -104,19 +121,13 @@ def init_db():
         )
     ''')
 
-    for pwd, default_status in DEFAULT_MASTER_PASSWORDS.items():
-        setting_key = f"pwd_status_{pwd}"
-        cursor.execute('''
-            INSERT INTO bot_settings (key, value) 
-            VALUES (%s, %s) 
-            ON CONFLICT (key) DO NOTHING
-        ''', (setting_key, default_status))
+    for pwd, (default_status, default_price) in DEFAULT_MASTER_PASSWORDS.items():
+        setting_key_st = f"pwd_status_{pwd}"
+        setting_key_pr = f"pwd_price_{pwd}"
+        cursor.execute('INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING', (setting_key_st, default_status))
+        cursor.execute('INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING', (setting_key_pr, str(default_price)))
 
-    cursor.execute('''
-        INSERT INTO bot_settings (key, value) 
-        VALUES ('welcome_text', %s) 
-        ON CONFLICT (key) DO NOTHING
-    ''', (DEFAULT_WELCOME_TEXT,))
+    cursor.execute('INSERT INTO bot_settings (key, value) VALUES (\'welcome_text\', %s) ON CONFLICT (key) DO NOTHING', (DEFAULT_WELCOME_TEXT,))
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dep_user ON deposits(user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_wd_user ON withdrawals(user_id)")
@@ -126,39 +137,47 @@ def init_db():
     cursor.close()
     conn.close()
 
-def get_all_password_statuses():
-    statuses = {}
+def get_all_passwords_info():
+    """Mengembalikan dict: {pwd: {'status': status, 'price': harga}}"""
+    pass_info = {}
     try:
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT key, value FROM bot_settings WHERE key LIKE 'pwd_status_%'")
+        cursor.execute("SELECT key, value FROM bot_settings WHERE key LIKE 'pwd_%'")
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
         
-        db_data = {r[0].replace('pwd_status_', ''): r[1] for r in rows}
-        for pwd in DEFAULT_MASTER_PASSWORDS.keys():
-            statuses[pwd] = db_data.get(pwd, DEFAULT_MASTER_PASSWORDS[pwd])
+        db_data = {r[0]: r[1] for r in rows}
+        for pwd, (def_st, def_pr) in DEFAULT_MASTER_PASSWORDS.items():
+            st = db_data.get(f"pwd_status_{pwd}", def_st)
+            pr = int(db_data.get(f"pwd_price_{pwd}", str(def_pr)))
+            pass_info[pwd] = {'status': st, 'price': pr}
     except Exception:
-        for pwd, st in DEFAULT_MASTER_PASSWORDS.items():
-            statuses[pwd] = st
-    return statuses
+        for pwd, (def_st, def_pr) in DEFAULT_MASTER_PASSWORDS.items():
+            pass_info[pwd] = {'status': def_st, 'price': def_pr}
+    return pass_info
 
 def set_password_status(password: str, status: str):
     conn = get_db()
     cursor = conn.cursor()
-    setting_key = f"pwd_status_{password}"
-    cursor.execute(
-        "INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", 
-        (setting_key, status)
-    )
+    cursor.execute("INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (f"pwd_status_{password}", status))
     conn.commit()
     cursor.close()
     conn.close()
 
-def get_current_allowed_passwords():
-    statuses = get_all_password_statuses()
-    return [pwd for pwd, st in statuses.items() if st == 'ACTIVE']
+def set_password_price(password: str, price: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (f"pwd_price_{password}", str(price)))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def get_active_passwords():
+    """Mengembalikan dict password aktif beserta harganya: {pwd: price}"""
+    info = get_all_passwords_info()
+    return {pwd: data['price'] for pwd, data in info.items() if data['status'] == 'ACTIVE'}
 
 def get_welcome_text_db():
     try:
@@ -177,10 +196,7 @@ def get_welcome_text_db():
 def set_welcome_text_db(text: str):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO bot_settings (key, value) VALUES ('welcome_text', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", 
-        (text,)
-    )
+    cursor.execute("INSERT INTO bot_settings (key, value) VALUES ('welcome_text', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (text,))
     conn.commit()
     cursor.close()
     conn.close()
@@ -194,23 +210,42 @@ def persistent_reply_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def main_menu_keyboard(user_id):
-    keyboard = [
-        [
-            InlineKeyboardButton("📥 Setor Satuan", callback_data="menu_satuan"),
-            InlineKeyboardButton("📦 Setor Bulking", callback_data="menu_bulking")
-        ],
-        [
-            InlineKeyboardButton("💰 Cek Saldo", callback_data="menu_saldo"),
-            InlineKeyboardButton("💸 Penarikan Dana", callback_data="menu_tarik")
-        ],
-        [
-            InlineKeyboardButton("📜 Riwayat Setoran", callback_data="menu_riwayat"),
-            InlineKeyboardButton("🧾 Riwayat Withdraw", callback_data="menu_riwayat_wd")
-        ],
-        [
-            InlineKeyboardButton("💬 Hubungi CS / Admin", url=f"https://t.me/{CS_USERNAME}")
+    active_pwds = get_active_passwords()
+    
+    # Apabila stock overload / password tidak ada yang aktif
+    if not active_pwds:
+        keyboard = [
+            [
+                InlineKeyboardButton("💰 Cek Saldo", callback_data="menu_saldo"),
+                InlineKeyboardButton("💸 Penarikan Dana", callback_data="menu_tarik")
+            ],
+            [
+                InlineKeyboardButton("📜 Riwayat Setoran", callback_data="menu_riwayat"),
+                InlineKeyboardButton("🧾 Riwayat Withdraw", callback_data="menu_riwayat_wd")
+            ],
+            [
+                InlineKeyboardButton("💬 Hubungi CS / Admin", url=f"https://t.me/{CS_USERNAME}")
+            ]
         ]
-    ]
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton("📥 Setor Satuan", callback_data="menu_satuan"),
+                InlineKeyboardButton("📦 Setor Bulking", callback_data="menu_bulking")
+            ],
+            [
+                InlineKeyboardButton("💰 Cek Saldo", callback_data="menu_saldo"),
+                InlineKeyboardButton("💸 Penarikan Dana", callback_data="menu_tarik")
+            ],
+            [
+                InlineKeyboardButton("📜 Riwayat Setoran", callback_data="menu_riwayat"),
+                InlineKeyboardButton("🧾 Riwayat Withdraw", callback_data="menu_riwayat_wd")
+            ],
+            [
+                InlineKeyboardButton("💬 Hubungi CS / Admin", url=f"https://t.me/{CS_USERNAME}")
+            ]
+        ]
+        
     if user_id == ADMIN_CHAT_ID:
         keyboard.append([InlineKeyboardButton("⚙️ Panel Admin", callback_data="admin_panel")])
         
@@ -223,11 +258,12 @@ def back_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Menu Utama", callback_data="menu_utama")]])
 
 def get_welcome_text(first_name):
-    allowed_pwds = get_current_allowed_passwords()
-    if allowed_pwds:
-        pwd_str = ", ".join([f"`{p}`" for p in allowed_pwds])
-    else:
-        pwd_str = "_Tidak ada sandi yang aktif saat ini_"
+    active_pwds = get_active_passwords()
+    if not active_pwds:
+        return OVERLOAD_WELCOME_TEXT.replace("{first_name}", str(first_name))
+
+    pwd_lines = [f"• `{pwd}` ➔ Rp {price:,}" for pwd, price in active_pwds.items()]
+    pwd_str = "\n".join(pwd_lines)
 
     template = get_welcome_text_db()
     formatted_text = template.replace("{first_name}", str(first_name)).replace("{pwd_str}", pwd_str)
@@ -263,33 +299,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(get_welcome_text(user.first_name), reply_markup=main_menu_keyboard(user.id), parse_mode='Markdown')
 
     elif data == "menu_satuan":
-        allowed_pwds = get_current_allowed_passwords()
-        if not allowed_pwds:
-            await query.answer("❌ Mohon maaf, saat ini tidak ada sandi yang diaktifkan oleh admin.", show_alert=True)
+        active_pwds = get_active_passwords()
+        if not active_pwds:
+            await query.answer("❌ Mohon maaf, setoran sedang ditutup (Overload).", show_alert=True)
             return
 
         context.user_data['mode'] = 'SATUAN'
-        pwd_example = " / ".join(allowed_pwds)
+        pwd_info_text = "\n".join([f"• `{p}` (Harga: Rp {pr:,})" for p, pr in active_pwds.items()])
+        sample_pwd = list(active_pwds.keys())[0]
+
         pesan = (
             "⏳ *MODE SETORAN SATUAN AKTIF*\n"
             "═══════════════════════\n"
             "Silakan ketik, kirim data Gmail kamu, atau kirim file `.txt` sekarang.\n\n"
-            "📌 *Format:* `email@gmail.com:password`\n"
-            f"💡 *Password Aktif:* {pwd_example}\n"
-            f"💡 *Contoh:* `ridwan123@gmail.com:{allowed_pwds[0]}`\n\n"
+            "📌 *Format:* `email@gmail.com:password`\n\n"
+            f"💡 *Password & Harga Aktif Hari Ini:*\n{pwd_info_text}\n\n"
+            f"💡 *Contoh:* `ridwan123@gmail.com:{sample_pwd}`\n\n"
             "_Sistem sedang menunggu inputan kamu..._"
         )
         await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
 
     elif data == "menu_bulking":
-        allowed_pwds = get_current_allowed_passwords()
-        if not allowed_pwds:
-            await query.answer("❌ Mohon maaf, saat ini tidak ada sandi yang diaktifkan oleh admin.", show_alert=True)
+        active_pwds = get_active_passwords()
+        if not active_pwds:
+            await query.answer("❌ Mohon maaf, setoran sedang ditutup (Overload).", show_alert=True)
             return
 
         keyboard = []
-        for p in allowed_pwds:
-            keyboard.append([InlineKeyboardButton(f"🔑 {p}", callback_data=f"bulkpwd_{p}")])
+        for p, pr in active_pwds.items():
+            keyboard.append([InlineKeyboardButton(f"🔑 {p} (Rp {pr:,})", callback_data=f"bulkpwd_{p}")])
         keyboard.append([InlineKeyboardButton("« Batal / Kembali", callback_data="menu_utama")])
         
         pesan = (
@@ -301,19 +339,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("bulkpwd_"):
         chosen_password = data.split('_')[1]
-        allowed_pwds = get_current_allowed_passwords()
+        active_pwds = get_active_passwords()
         
-        if chosen_password not in allowed_pwds:
+        if chosen_password not in active_pwds:
             await query.answer(f"❌ Sandi `{chosen_password}` sedang dinonaktifkan oleh Admin!", show_alert=True)
             return
 
+        pwd_price = active_pwds[chosen_password]
         context.user_data['mode'] = 'BULKING_INPUT_EMAILS'
         context.user_data['bulk_password'] = chosen_password
+        context.user_data['bulk_price'] = pwd_price
 
         pesan = (
             f"📦 *SETORAN BULKING AKTIF*\n"
             f"═══════════════════════\n"
             f"🔑 *Password Dipilih:* `{chosen_password}`\n"
+            f"💵 *Harga Per Akun:* Rp {pwd_price:,}\n"
             f"⚠️ *Batas Maksimal:* {MAX_BULK_LIMIT} Akun sekali kirim\n\n"
             f"Sekarang, silakan *ketik, paste daftar list gmail*, atau *kirim file .txt* dengan format awal (`email@gmail.com` atau `email@gmail.com:password`) di bawah ini (satu per baris):\n\n"
             f"📌 *Contoh Format:*\n"
@@ -337,6 +378,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'PENDING'", (user.id,))
         pen_count = cursor.fetchone()[0]
 
+        # Hitung estimasi saldo tertahan berbasis harga masing-masing deposit
+        cursor.execute("SELECT COALESCE(SUM(price), 0) FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (user.id,))
+        estimasi_pending = cursor.fetchone()[0]
+
         cursor.execute('SELECT balance FROM users WHERE user_id = %s', (user.id,))
         res = cursor.fetchone()
         balance_ready = res[0] if res else 0
@@ -344,13 +389,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
-        total_pending_all = proc_count + pen_count
-
         pesan = (
             f"📊 *INFORMASI AKUN & SALDO*\n"
             f"═══════════════════════\n"
             f"💵 *Saldo Siap Dicairkan:* Rp {balance_ready:,}\n"
-            f"⏳ *Estimasi Saldo Tertahan:* Rp {total_pending_all * HARGA_PER_GMAIL:,}\n"
+            f"⏳ *Estimasi Saldo Tertahan:* Rp {estimasi_pending:,}\n"
             f"═══════════════════════\n"
             f"✅ *Gmail Disetujui (Approved):* {app_count} Akun\n"
             f"🔄 *Gmail Diproses (Processing):* {proc_count} Akun\n"
@@ -363,7 +406,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute('SELECT gmail, status, created_at FROM deposits WHERE user_id = %s ORDER BY id DESC LIMIT 15', (user.id,))
+        cursor.execute('SELECT gmail, status, created_at, price FROM deposits WHERE user_id = %s ORDER BY id DESC LIMIT 15', (user.id,))
         items = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -372,7 +415,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pesan = "📜 *DAFTAR SETORAN GMAIL*\n═══════════════════════\nBelum ada riwayat setoran."
         else:
             pesan = "📜 *DAFTAR SETORAN GMAIL (15 Terakhir)*\n═══════════════════════\n"
-            for g_mail, st, dt in items:
+            for g_mail, st, dt, pr in items:
                 status_icon = "⏳ PENDING"
                 if st == "PROCESSING":
                     status_icon = "🔄 PROCESSING (Sudah Rekap)"
@@ -382,7 +425,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     status_icon = "❌ REJECTED"
                 
                 waktu = dt if dt else get_wib_time()
-                pesan += f"📧 `{g_mail}`\n└ Status: *{status_icon}*\n└ Waktu: `{waktu}`\n\n"
+                harga_str = f"Rp {pr:,}" if pr else "Rp 4.000"
+                pesan += f"📧 `{g_mail}`\n└ Rate: *{harga_str}*\n└ Status: *{status_icon}*\n└ Waktu: `{waktu}`\n\n"
 
         await query.edit_message_text(pesan, reply_markup=back_keyboard(), parse_mode='Markdown')
 
@@ -429,12 +473,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
-        if balance < HARGA_PER_GMAIL:
+        if balance < 4000:
             pesan = (
                 f"💸 *PENARIKAN DANA*\n"
                 f"═══════════════════════\n"
                 f"💰 *Saldo Dapat Dicairkan:* Rp {balance:,}\n\n"
-                f"⚠️ *Minimal penarikan dana adalah Rp {HARGA_PER_GMAIL:,} (Harga 1 Akun).* Saldo kamu belum mencukupi."
+                f"⚠️ *Minimal penarikan dana adalah Rp 4,000.* Saldo kamu belum mencukupi."
             )
             await query.edit_message_text(pesan, reply_markup=back_keyboard(), parse_mode='Markdown')
             return
@@ -504,14 +548,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         target_pwd = data.replace('admin_toggle_pwd_', '')
-        statuses = get_all_password_statuses()
+        all_info = get_all_passwords_info()
         
-        if target_pwd in statuses:
-            new_st = 'INACTIVE' if statuses[target_pwd] == 'ACTIVE' else 'ACTIVE'
+        if target_pwd in all_info:
+            current_st = all_info[target_pwd]['status']
+            new_st = 'INACTIVE' if current_st == 'ACTIVE' else 'ACTIVE'
             set_password_status(target_pwd, new_st)
-            await query.answer(f"✅ Sandi `{target_pwd}` diubah menjadi {new_st}!", show_alert=True)
+            await query.answer(f"✅ Status `{target_pwd}` diubah menjadi {new_st}!", show_alert=True)
 
         await render_admin_panel(query)
+
+    elif data.startswith("admin_set_price_ask_"):
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        target_pwd = data.replace('admin_set_price_ask_', '')
+        all_info = get_all_passwords_info()
+        current_pr = all_info.get(target_pwd, {}).get('price', 4000)
+
+        context.user_data['mode'] = 'WAITING_NEW_PWD_PRICE'
+        context.user_data['target_pwd_for_price'] = target_pwd
+
+        pesan = (
+            f"✏️ *UBAH HARGA PASSWORD: `{target_pwd}`*\n"
+            f"═══════════════════════\n"
+            f"💵 *Harga Saat Ini:* Rp {current_pr:,}\n\n"
+            f"Silakan ketik dan kirimkan nominal harga baru (contoh angka: `4500` / `5000`):"
+        )
+        await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
 
     elif data == "admin_edit_welcome_ask":
         if user.id != ADMIN_CHAT_ID:
@@ -526,7 +591,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Silakan kirimkan teks deskripsi baru untuk pesan /start atau refresh.\n\n"
             "💡 *Tips Tag Variabel Otomatis:*\n"
             "• Gunakan `{first_name}` untuk menampilkan nama user.\n"
-            "• Gunakan `{pwd_str}` untuk menampilkan daftar password aktif.\n\n"
+            "• Gunakan `{pwd_str}` untuk menampilkan daftar password aktif & harganya.\n\n"
             "📄 *Deskripsi Saat Ini:*\n"
             f"```\n{current_text}\n```\n\n"
             "_Kirim pesan berisi deskripsi baru sekarang..._"
@@ -541,7 +606,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT d.user_id, u.username, d.gmail, d.password, d.status, d.created_at 
+            SELECT d.user_id, u.username, d.gmail, d.password, d.status, d.created_at, d.price
             FROM deposits d 
             LEFT JOIN users u ON d.user_id = u.user_id 
             ORDER BY d.created_at DESC, d.user_id DESC
@@ -558,9 +623,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         grouped_data = {}
         total_semua_akun = len(all_deposits)
 
-        for uid, uname, gmail, pwd, status, dt in all_deposits:
+        for uid, uname, gmail, pwd, status, dt, pr in all_deposits:
             tanggal_str = dt.split()[0] if dt and len(dt.split()) > 0 else datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
             jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
+            pr_val = pr if pr else 4000
             
             if tanggal_str not in grouped_data:
                 grouped_data[tanggal_str] = {}
@@ -570,7 +636,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 grouped_data[tanggal_str][user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': [], 'REJECTED': []}
             
             if status in grouped_data[tanggal_str][user_key]:
-                grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd} | {jam_str} WIB")
+                grouped_data[tanggal_str][user_key][status].append(f"{gmail}:{pwd} (Rp {pr_val:,}) | {jam_str} WIB")
 
         txt_lines = []
         for tanggal, users_dict in grouped_data.items():
@@ -642,7 +708,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.answer(f"❌ Gagal mengirim file: {e}", show_alert=True)
 
-    # --- PERBAIKAN: DAFTAR SETORAN DENGAN PAGINATION (SLIDE) ---
     elif data == "admin_setoran" or data.startswith("admin_setoran_page_"):
         if user.id != ADMIN_CHAT_ID:
             await query.answer("❌ Akses khusus Admin!", show_alert=True)
@@ -893,10 +958,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor = conn.cursor()
         
         placeholders = ','.join(['%s'] * len(selected_deps))
+        # Ambil total harga spesifik dari akun-akun yang di-approve
+        cursor.execute(f"SELECT COALESCE(SUM(price), 0) FROM deposits WHERE id IN ({placeholders})", tuple(selected_deps))
+        total_added = cursor.fetchone()[0]
+
         cursor.execute(f"UPDATE deposits SET status = 'APPROVED' WHERE id IN ({placeholders})", tuple(selected_deps))
         
         count = len(selected_deps)
-        total_added = count * HARGA_PER_GMAIL
         cursor.execute('UPDATE users SET balance = balance + %s WHERE user_id = %s', (total_added, target_uid))
         conn.commit()
         cursor.close()
@@ -1089,12 +1157,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 async def render_admin_panel(query):
-    statuses = get_all_password_statuses()
+    pass_info = get_all_passwords_info()
     keyboard = []
 
-    for pwd, st in statuses.items():
+    for pwd, data in pass_info.items():
+        st = data['status']
+        pr = data['price']
         st_icon = "🟢 AKTIF" if st == 'ACTIVE' else "🔴 NONAKTIF"
-        keyboard.append([InlineKeyboardButton(f"🔑 Sandi [{pwd}]: {st_icon}", callback_data=f"admin_toggle_pwd_{pwd}")])
+        keyboard.append([
+            InlineKeyboardButton(f"🔑 [{pwd}]: {st_icon}", callback_data=f"admin_toggle_pwd_{pwd}"),
+            InlineKeyboardButton(f"💵 Rp {pr:,} (Ubah)", callback_data=f"admin_set_price_ask_{pwd}")
+        ])
 
     keyboard.extend([
         [InlineKeyboardButton("📝 Edit Deskripsi Start/Refresh", callback_data="admin_edit_welcome_ask")],
@@ -1109,9 +1182,9 @@ async def render_admin_panel(query):
     ])
 
     pesan = (
-        "⚙️ *PANEL ADMIN - PENGATURAN SANDI & LAYANAN*\n"
+        "⚙️ *PANEL ADMIN - PENGATURAN SANDI, HARGA & LAYANAN*\n"
         "═══════════════════════\n"
-        "Klik tombol sandi di bawah untuk mengaktifkan/menonaktifkan, atau gunakan menu kelola di bawah:"
+        "Atur status aktif/nonaktif dan harga masing-masing password di bawah ini:"
     )
     await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -1120,7 +1193,6 @@ async def render_admin_users_list(query, page=1):
     conn = get_db()
     cursor = conn.cursor()
     
-    # Kueri ini dikoreksi untuk menjamin seluruh user unik yang memiliki setoran aktif terhitung presisi
     cursor.execute('''
         SELECT d.user_id, u.username, COUNT(d.id) AS active_count
         FROM deposits d
@@ -1154,7 +1226,6 @@ async def render_admin_users_list(query, page=1):
         u_text = f"@{uname}" if uname else f"ID: {target_uid}"
         keyboard.append([InlineKeyboardButton(f"👤 {u_text} ({cnt} Akun Active)", callback_data=f"admuser_{target_uid}_1")])
 
-    # Baris tombol navigasi Slide / Page
     nav_buttons = []
     if page > 1:
         nav_buttons.append(InlineKeyboardButton("« Prev", callback_data=f"admin_setoran_page_{page - 1}"))
@@ -1182,7 +1253,7 @@ async def render_admin_users_list(query, page=1):
 async def render_admin_user_deposits(query, target_uid, context, page=1):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, gmail, password, status, created_at FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING') ORDER BY id DESC", (target_uid,))
+    cursor.execute("SELECT id, gmail, password, status, created_at, price FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING') ORDER BY id DESC", (target_uid,))
     items = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -1211,15 +1282,15 @@ async def render_admin_user_deposits(query, target_uid, context, page=1):
     )
     keyboard = []
 
-    for dep_id, g_mail, p_ass, st, dt in current_page_items:
+    for dep_id, g_mail, p_ass, st, dt, pr in current_page_items:
         is_checked = dep_id in selected_deps
         check_icon = "✅ [PILIH]" if is_checked else "⬜ [   ]"
         st_tag = "⏳ PENDING" if st == 'PENDING' else "🔄 PROC"
+        pr_val = pr if pr else 4000
         
-        pesan += f"{check_icon} `{g_mail}` | `{p_ass}` ({st_tag})\n"
+        pesan += f"{check_icon} `{g_mail}` | `{p_ass}` (Rp {pr_val:,}) ({st_tag})\n"
         keyboard.append([InlineKeyboardButton(f"{check_icon} {g_mail} ({st_tag})", callback_data=f"togdep_{dep_id}_{page}")])
 
-    # Slide Navigasi Halaman Akun
     nav_buttons = []
     if page > 1:
         nav_buttons.append(InlineKeyboardButton("« Prev", callback_data=f"admuser_{target_uid}_{page - 1}"))
@@ -1274,7 +1345,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif not is_document_upload and text == "📜 Daftar Setoran Saya":
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute('SELECT gmail, status, created_at FROM deposits WHERE user_id = %s ORDER BY id DESC LIMIT 15', (user.id,))
+        cursor.execute('SELECT gmail, status, created_at, price FROM deposits WHERE user_id = %s ORDER BY id DESC LIMIT 15', (user.id,))
         items = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -1283,7 +1354,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pesan = "📜 *DAFTAR SETORAN GMAIL*\n═══════════════════════\nBelum ada riwayat setoran."
         else:
             pesan = "📜 *DAFTAR SETORAN GMAIL (15 Terakhir)*\n═══════════════════════\n"
-            for g_mail, st, dt in items:
+            for g_mail, st, dt, pr in items:
                 status_icon = "⏳ PENDING"
                 if st == "PROCESSING":
                     status_icon = "🔄 PROCESSING (Sudah Rekap)"
@@ -1293,7 +1364,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     status_icon = "❌ REJECTED"
                 
                 waktu = dt if dt else get_wib_time()
-                pesan += f"📧 `{g_mail}`\n└ Status: *{status_icon}*\n└ Waktu: `{waktu}`\n\n"
+                harga_str = f"Rp {pr:,}" if pr else "Rp 4.000"
+                pesan += f"📧 `{g_mail}`\n└ Rate: *{harga_str}*\n└ Status: *{status_icon}*\n└ Waktu: `{waktu}`\n\n"
 
         await update.message.reply_text(pesan, reply_markup=back_keyboard(), parse_mode='Markdown')
         return
@@ -1306,19 +1378,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         proc_count = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status = 'PENDING'", (user.id,))
         pen_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COALESCE(SUM(price), 0) FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (user.id,))
+        estimasi_pending = cursor.fetchone()[0]
+
         cursor.execute('SELECT balance FROM users WHERE user_id = %s', (user.id,))
         res = cursor.fetchone()
         balance_ready = res[0] if res else 0
         cursor.close()
         conn.close()
 
-        total_pending_all = proc_count + pen_count
-
         pesan = (
             f"📊 *INFORMASI AKUN & SALDO*\n"
             f"═══════════════════════\n"
             f"💵 *Saldo Siap Dicairkan:* Rp {balance_ready:,}\n"
-            f"⏳ *Estimasi Saldo Tertahan:* Rp {total_pending_all * HARGA_PER_GMAIL:,}\n"
+            f"⏳ *Estimasi Saldo Tertahan:* Rp {estimasi_pending:,}\n"
             f"═══════════════════════\n"
             f"✅ *Gmail Disetujui (Approved):* {app_count} Akun\n"
             f"🔄 *Gmail Diproses (Processing):* {proc_count} Akun\n"
@@ -1353,6 +1427,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "✅ *DESKRIPSI START/REFRESH BERHASIL DIPERBARUI!*\n\n"
             "Pesan sambutan baru akan langsung tampil saat user klik `/start` atau **🔄 Refresh / Start**.",
+            reply_markup=main_menu_keyboard(user.id),
+            parse_mode='Markdown'
+        )
+        return
+
+    # --- PROSES EDIT HARGA PASSWORD ---
+    if current_mode == 'WAITING_NEW_PWD_PRICE':
+        if user.id != ADMIN_CHAT_ID:
+            return
+
+        target_pwd = context.user_data.get('target_pwd_for_price')
+        if not text.isdigit():
+            await update.message.reply_text("❌ Mohon masukkan angka nominal harga yang valid!", reply_markup=cancel_keyboard())
+            return
+
+        new_price = int(text)
+        set_password_price(target_pwd, new_price)
+
+        context.user_data.clear()
+        await update.message.reply_text(
+            f"✅ *HARGA PASSWORD BERHASIL DIUBAH!*\n\n"
+            f"🔑 *Password:* `{target_pwd}`\n"
+            f"💵 *Harga Baru:* Rp {new_price:,}",
             reply_markup=main_menu_keyboard(user.id),
             parse_mode='Markdown'
         )
@@ -1576,17 +1673,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success_count = 0
         not_found_count = 0
         user_approve_map = {}
+        total_payout_sum = 0
 
         for email in emails_to_approve:
-            cursor.execute("SELECT id, user_id FROM deposits WHERE TRIM(LOWER(gmail)) = TRIM(LOWER(%s)) AND status IN ('PENDING', 'PROCESSING')", (email,))
+            cursor.execute("SELECT id, user_id, price FROM deposits WHERE TRIM(LOWER(gmail)) = TRIM(LOWER(%s)) AND status IN ('PENDING', 'PROCESSING')", (email,))
             row = cursor.fetchone()
             
             if row:
-                dep_id, target_uid = row
+                dep_id, target_uid, item_price = row
+                item_price_val = item_price if item_price else 4000
+                
                 cursor.execute("UPDATE deposits SET status = 'APPROVED' WHERE id = %s", (dep_id,))
-                cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (HARGA_PER_GMAIL, target_uid))
+                cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (item_price_val, target_uid))
+                
                 success_count += 1
-                user_approve_map[target_uid] = user_approve_map.get(target_uid, 0) + 1
+                total_payout_sum += item_price_val
+                
+                if target_uid not in user_approve_map:
+                    user_approve_map[target_uid] = {'count': 0, 'added_balance': 0}
+                user_approve_map[target_uid]['count'] += 1
+                user_approve_map[target_uid]['added_balance'] += item_price_val
             else:
                 not_found_count += 1
 
@@ -1594,8 +1700,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
-        for target_uid, app_cnt in user_approve_map.items():
-            tot_added = app_cnt * HARGA_PER_GMAIL
+        for target_uid, data_acc in user_approve_map.items():
+            app_cnt = data_acc['count']
+            tot_added = data_acc['added_balance']
             try:
                 await context.bot.send_message(
                     chat_id=target_uid,
@@ -1614,7 +1721,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ *AUTO APPROVE MASSAL GLOBAL BERHASIL!*\n\n"
             f"• Berhasil di-approve & ditambah saldo: `{success_count}` akun untuk `{len(user_approve_map)}` user\n"
             f"• Tidak cocok / bukan status aktif: `{not_found_count}` akun\n"
-            f"• Total nominal dikreditkan: Rp {success_count * HARGA_PER_GMAIL:,}",
+            f"• Total nominal dikreditkan: Rp {total_payout_sum:,}",
             reply_markup=main_menu_keyboard(user.id),
             parse_mode='Markdown'
         )
@@ -1712,10 +1819,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     items_to_process = []
     is_bulking_mode = (current_mode == 'BULKING_INPUT_EMAILS')
     bulk_password_used = context.user_data.get('bulk_password') if is_bulking_mode else None
+    bulk_price_used = context.user_data.get('bulk_price', 4000) if is_bulking_mode else 4000
 
-    allowed_pwds = get_current_allowed_passwords()
+    active_pwds = get_active_passwords()
 
-    if is_bulking_mode and bulk_password_used not in allowed_pwds:
+    if is_bulking_mode and bulk_password_used not in active_pwds:
         await update.message.reply_text(f"❌ Sandi `{bulk_password_used}` sedang dinonaktifkan oleh Admin!", reply_markup=main_menu_keyboard(user.id))
         context.user_data.clear()
         return
@@ -1737,10 +1845,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if extracted_email.endswith('@gmail.com') and len(extracted_email) > 10:
             if current_mode == 'SATUAN':
-                if extracted_pwd in allowed_pwds:
-                    items_to_process.append((extracted_email, extracted_pwd))
+                if extracted_pwd in active_pwds:
+                    items_to_process.append((extracted_email, extracted_pwd, active_pwds[extracted_pwd]))
             elif is_bulking_mode:
-                items_to_process.append((extracted_email, bulk_password_used))
+                items_to_process.append((extracted_email, bulk_password_used, bulk_price_used))
 
     total_input_count = len(items_to_process)
     if is_bulking_mode and total_input_count > MAX_BULK_LIMIT:
@@ -1753,10 +1861,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         inserted_count = 0
         duplicate_count = 0
+        total_batch_price = 0
         successfully_inserted_accounts = []
         seen_batch_emails = set()
 
-        for gmail, password in items_to_process:
+        for gmail, password, price_val in items_to_process:
             gmail_clean = gmail.strip().lower()
 
             if gmail_clean in seen_batch_emails:
@@ -1772,9 +1881,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             now_str = get_wib_time()
 
             try:
-                cursor.execute("INSERT INTO deposits (user_id, gmail, password, status, created_at) VALUES (%s, %s, %s, 'PENDING', %s)", (user.id, gmail_clean, password, now_str))
+                cursor.execute("INSERT INTO deposits (user_id, gmail, password, status, created_at, price) VALUES (%s, %s, %s, 'PENDING', %s, %s)", 
+                               (user.id, gmail_clean, password, now_str, price_val))
                 inserted_count += 1
-                successfully_inserted_accounts.append((gmail_clean, password, now_str))
+                total_batch_price += price_val
+                successfully_inserted_accounts.append((gmail_clean, password, now_str, price_val))
             except psycopg2.IntegrityError:
                 conn.rollback()
                 duplicate_count += 1
@@ -1792,7 +1903,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute("SELECT gmail, password, status, created_at FROM deposits WHERE user_id = %s ORDER BY id ASC", (user.id,))
+            cursor.execute("SELECT gmail, password, status, created_at, price FROM deposits WHERE user_id = %s ORDER BY id ASC", (user.id,))
             user_all_deposits = cursor.fetchall()
             cursor.close()
             conn.close()
@@ -1802,9 +1913,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             approved_list = []
             rejected_list = []
 
-            for g, p, st, dt in user_all_deposits:
+            for g, p, st, dt, pr in user_all_deposits:
                 jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
-                formatted_item = f"{g}:{p} | {jam_str} WIB"
+                pr_val = pr if pr else 4000
+                formatted_item = f"{g}:{p} (Rp {pr_val:,}) | {jam_str} WIB"
                 if st == 'PENDING':
                     pending_list.append(formatted_item)
                 elif st == 'PROCESSING':
@@ -1863,6 +1975,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"═══════════════════════\n"
                 f"👤 *User:* {user.first_name} ({username_txt})\n"
                 f"📦 *Akun Baru Masuk:* `{inserted_count}` Akun\n"
+                f"💰 *Estimasi Nilai:* Rp {total_batch_price:,}\n"
                 f"═══════════════════════\n"
                 f"📄 *File .txt di atas berisi seluruh daftar setoran aktif & riwayat lengkap user tanpa ada yang hilang.*"
             )
@@ -1883,8 +1996,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if inserted_count > 0:
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (user.id,))
-            total_active_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*), COALESCE(SUM(price), 0) FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (user.id,))
+            row_act = cursor.fetchone()
+            total_active_count = row_act[0]
+            total_active_est = row_act[1]
             cursor.close()
             conn.close()
 
@@ -1892,7 +2007,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ *AKUN BERHASIL TERKIRIM & DIARKIBKAN!*\n\n"
                 f"📩 Total `{inserted_count}` akun baru ditambahkan (Status: Pending).\n"
                 f"📂 Total akumulasi akun aktif (Pending + Processing) Anda: `{total_active_count}` akun.\n"
-                f"⏳ Estimasi saldo tertahan: *Rp {total_active_count * HARGA_PER_GMAIL:,}*\n"
+                f"⏳ Estimasi saldo tertahan: *Rp {total_active_est:,}*\n"
             )
         if duplicate_count > 0:
             msg_response += f"\n⚠️ *AUTO REJECT:* `{duplicate_count}` akun ditolak otomatis oleh sistem karena akun/Gmail tersebut sudah pernah terdaftar di database (Anti-Kecurangan)."
@@ -1910,10 +2025,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
     else:
-        allowed_str = ", ".join(allowed_pwds) if allowed_pwds else "Tidak ada"
+        allowed_str = ", ".join([f"`{p}`" for p in active_pwds.keys()]) if active_pwds else "Tidak ada"
         error_msg = (
             f"❌ *FORMAT LIST / SANDI TIDAK VALID!*\n\n"
-            f"⚠️ Pastikan sandi yang digunakan sesuai dengan daftar sandi yang **aktif** hari ini: `{allowed_str}`.\n\n"
+            f"⚠️ Pastikan sandi yang digunakan sesuai dengan daftar sandi yang **aktif** hari ini: {allowed_str}.\n\n"
             f"🌐 Silakan cek terlebih dahulu di web *netnit.net*:\n"
             f"1. Masuk dan lakukan **Quick Fix Issue** pada akun Anda.\n"
             f"2. Pastikan status akun di sana sudah **Wajib GOOD semua** sebelum disetor ulang ke bot ini!"
@@ -1937,5 +2052,5 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_message))
 
-    print("Bot Setoran V30 Aktif (System Auto Reject Fraud Activated)...")
+    print("Bot Setoran V30 Aktif (System Auto Reject Fraud & Dynamic Price Activated)...")
     app.run_polling()
