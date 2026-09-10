@@ -266,7 +266,8 @@ def generate_user_txt_rekap(target_uid, username_txt):
 def persistent_reply_keyboard():
     keyboard = [
         [KeyboardButton("🔄 Refresh / Start"), KeyboardButton("📜 Daftar Setoran Saya")],
-        [KeyboardButton("💰 Cek Saldo"), KeyboardButton("💬 Hubungi CS")]
+        [KeyboardButton("🚫 Batal Setoran Pending"), KeyboardButton("💰 Cek Saldo")],
+        [KeyboardButton("💬 Hubungi CS")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -282,6 +283,9 @@ def main_menu_keyboard(user_id):
             [
                 InlineKeyboardButton("📜 Riwayat Setoran", callback_data="menu_riwayat"),
                 InlineKeyboardButton("🧾 Riwayat Withdraw", callback_data="menu_riwayat_wd")
+            ],
+            [
+                InlineKeyboardButton("🚫 Batal Setoran Pending", callback_data="menu_batal_pending")
             ],
             [
                 InlineKeyboardButton("💬 Hubungi CS / Admin", url=f"https://t.me/{CS_USERNAME}")
@@ -300,6 +304,9 @@ def main_menu_keyboard(user_id):
             [
                 InlineKeyboardButton("📜 Riwayat Setoran", callback_data="menu_riwayat"),
                 InlineKeyboardButton("🧾 Riwayat Withdraw", callback_data="menu_riwayat_wd")
+            ],
+            [
+                InlineKeyboardButton("🚫 Batal Setoran Pending", callback_data="menu_batal_pending")
             ],
             [
                 InlineKeyboardButton("💬 Hubungi CS / Admin", url=f"https://t.me/{CS_USERNAME}")
@@ -487,6 +494,63 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(pesan, reply_markup=back_keyboard(), parse_mode='Markdown')
 
+    elif data == "menu_batal_pending":
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, gmail, password, price FROM deposits WHERE user_id = %s AND status = 'PENDING' ORDER BY id DESC", (user.id,))
+        pending_items = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not pending_items:
+            await query.edit_message_text("🚫 *Tidak ada setoran berstatus PENDING yang dapat dibatalkan.*", reply_markup=back_keyboard(), parse_mode='Markdown')
+            return
+
+        pesan = (
+            f"🚫 *BATALKAN SETORAN PENDING*\n"
+            f"═══════════════════════\n"
+            f"Pilih akun di bawah ini yang ingin Anda batalkan setorannya.\n"
+            f"⚠️ *Perhatian:* Akun yang dibatalkan akan **langsung dihapus secara permanen dari database**.\n\n"
+        )
+        keyboard = []
+        for dep_id, g_mail, p_ass, pr in pending_items[:15]:
+            pr_val = pr if pr else 4000
+            keyboard.append([InlineKeyboardButton(f"❌ Batal `{g_mail}` (Rp {pr_val:,})", callback_data=f"user_cancel_dep_{dep_id}")])
+        
+        keyboard.append([InlineKeyboardButton("🔥 Batalkan SEMUA Akun Pending", callback_data="user_cancel_all_pending")])
+        keyboard.append([InlineKeyboardButton("« Kembali ke Menu Utama", callback_data="menu_utama")])
+        await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data.startswith("user_cancel_dep_"):
+        dep_id = int(data.split('_')[3])
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM deposits WHERE id = %s AND user_id = %s AND status = 'PENDING' RETURNING gmail", (dep_id, user.id))
+        deleted = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        if deleted:
+            await query.answer(f"✅ Setoran `{deleted[0]}` telah dibatalkan & dihapus!", show_alert=True)
+        else:
+            await query.answer("⚠️ Gagal membatalkan setoran. Akun sudah diproses admin.", show_alert=True)
+
+        await query.edit_message_text("Pembaruan daftar setoran pending...", reply_markup=back_keyboard())
+
+    elif data == "user_cancel_all_pending":
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM deposits WHERE user_id = %s AND status = 'PENDING' RETURNING id", (user.id,))
+        deleted_rows = cursor.fetchall()
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        count_del = len(deleted_rows)
+        await query.answer(f"✅ Berhasil membatalkan {count_del} akun setoran pending!", show_alert=True)
+        await query.edit_message_text(f"✅ *Sebanyak {count_del} akun setoran PENDING berhasil dibatalkan dan dihapus dari database.*", reply_markup=back_keyboard(), parse_mode='Markdown')
+
     elif data == "menu_riwayat_wd":
         context.user_data.clear()
         conn = get_db()
@@ -654,6 +718,135 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "_Kirim pesan berisi deskripsi baru sekarang..._"
         )
         await query.edit_message_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
+
+    elif data == "admin_export_menu":
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        keyboard = [
+            [InlineKeyboardButton("📂 Rekap SEMUA Status Database", callback_data="admin_export_all_deposits")],
+            [InlineKeyboardButton("✅ Rekap Khusus APPROVED Realtime", callback_data="admin_export_pwd_select_APPROVED")],
+            [InlineKeyboardButton("⏳ Rekap Khusus PENDING (+ Nama User)", callback_data="admin_export_simple_PENDING")],
+            [InlineKeyboardButton("🔄 Rekap Khusus PROCESSING (+ Nama User)", callback_data="admin_export_simple_PROCESSING")],
+            [InlineKeyboardButton("« Kembali ke Panel Admin", callback_data="admin_panel")]
+        ]
+        pesan = (
+            "📊 *MENU FITUR EKSPOR REKAP REALTIME (.TXT)*\n"
+            "═══════════════════════\n"
+            "Pilih jenis rekap data yang ingin Anda unduh dalam format .txt:"
+        )
+        await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data.startswith("admin_export_pwd_select_"):
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        target_st = data.replace('admin_export_pwd_select_', '')
+        keyboard = [
+            [InlineKeyboardButton("🌐 Semua Kata Sandi", callback_data=f"do_exp_st_{target_st}_all")],
+            [InlineKeyboardButton("🔑 fineirga", callback_data=f"do_exp_st_{target_st}_fineirga")],
+            [InlineKeyboardButton("🔑 prabujaya", callback_data=f"do_exp_st_{target_st}_prabujaya")],
+            [InlineKeyboardButton("🔑 sgsg", callback_data=f"do_exp_st_{target_st}_sgsg")],
+            [InlineKeyboardButton("🔑 selaras 9", callback_data=f"do_exp_st_{target_st}_selaras9")],
+            [InlineKeyboardButton("« Kembali", callback_data="admin_export_menu")]
+        ]
+        pesan = f"🔑 *PILIH FILTER PASSWORD UNTUK REKAP {target_st}*"
+        await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    elif data.startswith("do_exp_st_"):
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        parts = data.split('_')
+        target_st = parts[3]
+        target_pwd_filter = parts[4]
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        query_sql = "SELECT d.gmail, d.password, u.username FROM deposits d LEFT JOIN users u ON d.user_id = u.user_id WHERE d.status = %s"
+        params = [target_st]
+
+        if target_pwd_filter != 'all':
+            if target_pwd_filter == 'selaras9':
+                query_sql += " AND (LOWER(d.password) LIKE '%selaras%' OR LOWER(d.password) LIKE '%selaras9%')"
+            elif target_pwd_filter == 'sgsg':
+                query_sql += " AND LOWER(d.password) LIKE '%sgsg%'"
+            else:
+                query_sql += " AND LOWER(d.password) = %s"
+                params.append(target_pwd_filter.lower())
+
+        cursor.execute(query_sql, tuple(params))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            await query.answer(f"⚠️ Tidak ada data {target_st} dengan filter kata sandi tersebut.", show_alert=True)
+            return
+
+        txt_lines = [f"{g}:{p}" for g, p, _ in rows]
+        txt_content = "\n".join(txt_lines)
+        txt_file = io.BytesIO(txt_content.encode('utf-8'))
+
+        wib_now = datetime.now(timezone(timedelta(hours=7))).strftime('%Y%m%d_%H%M%S')
+        filename = f"{target_st.lower()}_{target_pwd_filter}_{wib_now}.txt"
+
+        await context.bot.send_document(
+            chat_id=user.id,
+            document=txt_file,
+            filename=filename,
+            caption=f"📄 *REKAP {target_st} REALTIME*\n• Filter Password: `{target_pwd_filter}`\n• Total Akun: `{len(rows)}` Akun",
+            parse_mode='Markdown'
+        )
+        await query.answer("✅ File rekap berhasil dikirim!", show_alert=False)
+
+    elif data.startswith("admin_export_simple_"):
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        target_st = data.replace('admin_export_simple_', '')
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT d.gmail, d.password, u.username, d.user_id 
+            FROM deposits d 
+            LEFT JOIN users u ON d.user_id = u.user_id 
+            WHERE d.status = %s
+            ORDER BY d.id ASC
+        ''', (target_st,))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            await query.answer(f"⚠️ Tidak ada data setoran berstatus {target_st}.", show_alert=True)
+            return
+
+        txt_lines = []
+        for gmail, pwd, uname, uid in rows:
+            u_tag = f"@{uname}" if uname else f"User_{uid}"
+            txt_lines.append(f"{gmail}:{pwd} | {u_tag}")
+
+        txt_content = "\n".join(txt_lines)
+        txt_file = io.BytesIO(txt_content.encode('utf-8'))
+
+        wib_now = datetime.now(timezone(timedelta(hours=7))).strftime('%Y%m%d_%H%M%S')
+        filename = f"daftar_{target_st.lower()}_user_{wib_now}.txt"
+
+        await context.bot.send_document(
+            chat_id=user.id,
+            document=txt_file,
+            filename=filename,
+            caption=f"📋 *DAFTAR {target_st} REALTIME (+ NAMA USER)*\n• Total Akun: `{len(rows)}` Akun",
+            parse_mode='Markdown'
+        )
+        await query.answer("✅ File berhasil dikirim!", show_alert=False)
 
     elif data == "admin_export_all_deposits":
         if user.id != ADMIN_CHAT_ID:
@@ -916,7 +1109,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM deposits WHERE user_id = %s", (target_uid,))
+        cursor.execute("SELECT id FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (target_uid,))
         all_items = [row[0] for row in cursor.fetchall()]
         cursor.close()
         conn.close()
@@ -1243,13 +1436,13 @@ async def render_admin_panel(query):
 
     keyboard.extend([
         [InlineKeyboardButton("📝 Edit Deskripsi Start/Refresh", callback_data="admin_edit_welcome_ask")],
-        [InlineKeyboardButton("⚙️ Kelola Setoran Gmail Active", callback_data="admin_setoran")],
+        [InlineKeyboardButton("⚙️ Kelola Setoran Gmail Active (Pending & Processing)", callback_data="admin_setoran")],
         [InlineKeyboardButton("🔄 Auto Rekap Massal -> Processing", callback_data="global_paste_process_ask")],
         [InlineKeyboardButton("✅ Auto Approve Massal -> Approved", callback_data="global_paste_approve_ask")],
         [InlineKeyboardButton("❌ Auto Reject Massal -> Rejected", callback_data="global_paste_reject_ask")],
         [InlineKeyboardButton("📢 Pengumuman / Broadcast All User", callback_data="admin_broadcast")],
         [InlineKeyboardButton("💸 Kelola Withdraw Pending", callback_data="admin_withdraw")],
-        [InlineKeyboardButton("📂 Rekap Setoran Terpisah Realtime (.txt)", callback_data="admin_export_all_deposits")],
+        [InlineKeyboardButton("📂 Fitur Ekspor Rekap Realtime (.txt)", callback_data="admin_export_menu")],
         [InlineKeyboardButton("« Kembali ke Menu Utama", callback_data="menu_utama")]
     ])
 
@@ -1265,10 +1458,12 @@ async def render_admin_users_list(query, page=1):
     conn = get_db()
     cursor = conn.cursor()
     
+    # Hanya menampilkan setoran berstatus PENDING dan PROCESSING (APPROVED tidak dimunculkan di daftar aktif)
     cursor.execute('''
         SELECT d.user_id, u.username, COUNT(d.id) AS active_count
         FROM deposits d
         LEFT JOIN users u ON d.user_id = u.user_id
+        WHERE d.status IN ('PENDING', 'PROCESSING')
         GROUP BY d.user_id, u.username
         ORDER BY active_count DESC
     ''')
@@ -1278,7 +1473,7 @@ async def render_admin_users_list(query, page=1):
 
     if not user_list:
         await query.edit_message_text(
-            "✅ *Tidak ada data setoran saat ini.*",
+            "✅ *Tidak ada data setoran aktif (Pending/Processing) saat ini.*",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Panel Admin", callback_data="admin_panel")]]),
             parse_mode='Markdown'
         )
@@ -1295,7 +1490,7 @@ async def render_admin_users_list(query, page=1):
     keyboard = []
     for target_uid, uname, cnt in current_page_users:
         u_text = f"@{uname}" if uname else f"ID: {target_uid}"
-        keyboard.append([InlineKeyboardButton(f"👤 {u_text} ({cnt} Akun Total)", callback_data=f"admuser_{target_uid}_1")])
+        keyboard.append([InlineKeyboardButton(f"👤 {u_text} ({cnt} Akun Aktif)", callback_data=f"admuser_{target_uid}_1")])
 
     nav_buttons = []
     if page > 1:
@@ -1311,10 +1506,10 @@ async def render_admin_users_list(query, page=1):
 
     total_active_all_accounts = sum(item[2] for item in user_list)
     pesan = (
-        f"⚙️ *PANEL ADMIN - KELOLA SETORAN UNTUK VERIFIKASI*\n"
+        f"⚙️ *PANEL ADMIN - KELOLA SETORAN AKTIF (PENDING & PROCESSING)*\n"
         f"═══════════════════════\n"
-        f"👥 *Total User Terdaftar:* `{total_users}` User\n"
-        f"📦 *Total Seluruh Akun:* `{total_active_all_accounts}` Akun\n"
+        f"👥 *Total User Aktif:* `{total_users}` User\n"
+        f"📦 *Total Akun Aktif:* `{total_active_all_accounts}` Akun\n"
         f"📖 *Halaman:* {page} dari {total_pages}\n"
         f"═══════════════════════\n"
         f"Pilih user di bawah ini untuk melihat dan mengelola status akun:"
@@ -1324,13 +1519,14 @@ async def render_admin_users_list(query, page=1):
 async def render_admin_user_deposits(query, target_uid, context, page=1):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, gmail, password, status, created_at, price FROM deposits WHERE user_id = %s ORDER BY id DESC", (target_uid,))
+    # Hanya mengambil setoran PENDING dan PROCESSING
+    cursor.execute("SELECT id, gmail, password, status, created_at, price FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING') ORDER BY id DESC", (target_uid,))
     items = cursor.fetchall()
     cursor.close()
     conn.close()
 
     if not items:
-        await query.edit_message_text("✅ *Tidak ada setoran untuk user ini.*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]), parse_mode='Markdown')
+        await query.edit_message_text("✅ *Tidak ada setoran aktif untuk user ini.*", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]), parse_mode='Markdown')
         return
 
     total_items = len(items)
@@ -1346,7 +1542,7 @@ async def render_admin_user_deposits(query, target_uid, context, page=1):
     pesan = (
         f"📧 *PILIH AKUN GMAIL (User ID: `{target_uid}`)*\n"
         f"═══════════════════════\n"
-        f"📦 *Total Akun User Ini:* {total_items} Akun\n"
+        f"📦 *Total Akun Aktif User Ini:* {total_items} Akun\n"
         f"📖 *Halaman:* {page} dari {total_pages}\n"
         f"═══════════════════════\n"
         f"Silakan centang akun yang ingin diproses:\n\n"
@@ -1360,8 +1556,6 @@ async def render_admin_user_deposits(query, target_uid, context, page=1):
         st_tag = "⏳ PENDING"
         if st == 'PROCESSING':
             st_tag = "🔄 PROC"
-        elif st == 'APPROVED':
-            st_tag = "✅ APP"
 
         pr_val = pr if pr else 4000
         
@@ -1443,6 +1637,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pesan += f"📧 `{g_mail}`\n└ Rate: *{harga_str}*\n└ Status: *{status_icon}*\n└ Waktu: `{waktu}`\n\n"
 
         await update.message.reply_text(pesan, reply_markup=back_keyboard(), parse_mode='Markdown')
+        return
+    elif not is_document_upload and text == "🚫 Batal Setoran Pending":
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, gmail, password, price FROM deposits WHERE user_id = %s AND status = 'PENDING' ORDER BY id DESC", (user.id,))
+        pending_items = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not pending_items:
+            await update.message.reply_text("🚫 *Tidak ada setoran berstatus PENDING yang dapat dibatalkan.*", reply_markup=back_keyboard(), parse_mode='Markdown')
+            return
+
+        pesan = (
+            f"🚫 *BATALKAN SETORAN PENDING*\n"
+            f"═══════════════════════\n"
+            f"Pilih akun di bawah ini yang ingin Anda batalkan setorannya.\n"
+            f"⚠️ *Perhatian:* Akun yang dibatalkan akan **langsung dihapus secara permanen dari database**.\n\n"
+        )
+        keyboard = []
+        for dep_id, g_mail, p_ass, pr in pending_items[:15]:
+            pr_val = pr if pr else 4000
+            keyboard.append([InlineKeyboardButton(f"❌ Batal `{g_mail}` (Rp {pr_val:,})", callback_data=f"user_cancel_dep_{dep_id}")])
+        
+        keyboard.append([InlineKeyboardButton("🔥 Batalkan SEMUA Akun Pending", callback_data="user_cancel_all_pending")])
+        keyboard.append([InlineKeyboardButton("« Kembali ke Menu Utama", callback_data="menu_utama")])
+        await update.message.reply_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         return
     elif not is_document_upload and text == "💰 Cek Saldo":
         conn = get_db()
