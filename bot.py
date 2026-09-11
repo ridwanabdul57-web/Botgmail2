@@ -137,7 +137,7 @@ def init_db():
     conn.close()
 
 def delete_rejected_deposits():
-    """Menghapus semua akun berstatus REJECTED dari database."""
+    """Opsi pembersihan manual akun berstatus REJECTED jika diperlukan."""
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -726,6 +726,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         keyboard = [
             [InlineKeyboardButton("📂 Rekap SEMUA Status Database", callback_data="admin_export_all_deposits")],
+            [InlineKeyboardButton("🚫 Rekap Khusus REJECTED Realtime", callback_data="admin_export_rejected_txt")],
             [InlineKeyboardButton("✅ Rekap Khusus APPROVED Realtime", callback_data="admin_export_pwd_select_APPROVED")],
             [InlineKeyboardButton("⏳ Rekap Khusus PENDING (+ Nama User)", callback_data="admin_export_simple_PENDING")],
             [InlineKeyboardButton("🔄 Rekap Khusus PROCESSING (+ Nama User)", callback_data="admin_export_simple_PROCESSING")],
@@ -737,6 +738,74 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Pilih jenis rekap data yang ingin Anda unduh dalam format .txt:"
         )
         await query.edit_message_text(pesan, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    # FITUR BARU: EKSPOR DAFTAR TOTAL GMAIL REJECT VIA .TXT REALTIME PER USER
+    elif data == "admin_export_rejected_txt":
+        if user.id != ADMIN_CHAT_ID:
+            await query.answer("❌ Akses khusus Admin!", show_alert=True)
+            return
+
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT d.user_id, u.username, d.gmail, d.password, d.created_at, d.price 
+            FROM deposits d 
+            LEFT JOIN users u ON d.user_id = u.user_id 
+            WHERE d.status = 'REJECTED' 
+            ORDER BY d.user_id DESC, d.id ASC
+        ''')
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            await query.answer("⚠️ Tidak ada data Gmail REJECTED di database saat ini.", show_alert=True)
+            return
+
+        user_grouped = {}
+        for uid, uname, gmail, pwd, dt, pr in rows:
+            jam_str = dt.split()[1] if dt and len(dt.split()) > 1 else "00:00:00"
+            u_tag = f"@{uname}" if uname else f"User_{uid}"
+
+            if u_tag not in user_grouped:
+                user_grouped[u_tag] = []
+            
+            user_grouped[u_tag].append(f"{gmail}:{pwd} | {jam_str} WIB")
+
+        tgl_sekarang = datetime.now(timezone(timedelta(hours=7))).strftime('%d-%m-%Y')
+        txt_lines = [
+            f"🚫 DAFTAR REKAP TOTAL GMAIL REJECT REALTIME - {tgl_sekarang}",
+            "==================================================",
+            ""
+        ]
+
+        total_reject_all = len(rows)
+
+        for u_tag, items in user_grouped.items():
+            txt_lines.append(f"👤 USER: {u_tag}")
+            txt_lines.append(f"📦 TOTAL GMAIL REJECT USER INI: {len(items)} Akun")
+            txt_lines.append("--------------------------------------------------")
+            txt_lines.extend(items)
+            txt_lines.append("--------------------------------------------------\n")
+
+        txt_lines.append("==================================================")
+        txt_lines.append(f"📊 KESELURUHAN TOTAL GMAIL REJECT: {total_reject_all} Akun")
+        txt_lines.append("==================================================")
+
+        txt_content = "\n".join(txt_lines)
+        txt_file = io.BytesIO(txt_content.encode('utf-8'))
+
+        wib_now = datetime.now(timezone(timedelta(hours=7))).strftime('%Y%m%d_%H%M%S')
+        filename = f"daftar_gmail_reject_realtime_{wib_now}.txt"
+
+        await context.bot.send_document(
+            chat_id=user.id,
+            document=txt_file,
+            filename=filename,
+            caption=f"🚫 *REKAP REJECTED REALTIME (.TXT)*\n• Total Gmail Reject: `{total_reject_all}` Akun\n• Total User: `{len(user_grouped)}` User",
+            parse_mode='Markdown'
+        )
+        await query.answer("✅ File rekap reject berhasil dikirim!", show_alert=False)
 
     elif data.startswith("admin_export_pwd_select_"):
         if user.id != ADMIN_CHAT_ID:
@@ -879,7 +948,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             user_key = (uid, uname)
             if user_key not in user_grouped_data:
-                user_grouped_data[user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': []}
+                user_grouped_data[user_key] = {'PENDING': [], 'PROCESSING': [], 'APPROVED': [], 'REJECTED': []}
             
             if status in user_grouped_data[user_key]:
                 user_grouped_data[user_key][status].append(f"{gmail}:{pwd} (Rp {pr_val:,}) | {jam_str} WIB")
@@ -892,7 +961,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tot_p = len(statuses_dict['PENDING'])
             tot_pr = len(statuses_dict['PROCESSING'])
             tot_a = len(statuses_dict['APPROVED'])
-            tot_user = tot_p + tot_pr + tot_a
+            tot_r = len(statuses_dict['REJECTED'])
+            tot_user = tot_p + tot_pr + tot_a + tot_r
 
             txt_lines.append(f"👤 USER: {u_tag} (ID: {uid}) - Total Setor: {tot_user} Akun")
             
@@ -904,6 +974,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             txt_lines.append(f"  • Gmail Approved (Saldo Masuk) ({tot_a}) :")
             txt_lines.extend([f"    {item}" for item in statuses_dict['APPROVED']] if statuses_dict['APPROVED'] else ["    -"])
+
+            txt_lines.append(f"  • Gmail Rejected (Ditolak) ({tot_r}) :")
+            txt_lines.extend([f"    {item}" for item in statuses_dict['REJECTED']] if statuses_dict['REJECTED'] else ["    -"])
             
             txt_lines.append("--------------------------------------------------")
 
@@ -1287,8 +1360,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = len(selected_deps)
         context.user_data['selected_deps'] = []
 
-        delete_rejected_deposits()
-
         u_text = f"@{uname}" if uname else f"User_{target_uid}"
         txt_file, filename = generate_user_txt_rekap(target_uid, u_text)
 
@@ -1296,11 +1367,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=user.id,
             document=txt_file,
             filename=filename,
-            caption=f"📄 *REKAP UPDATE REALTIME (REJECTED & DELETED)*\n• User: {u_text}\n• Total akun ditolak dan dihapus dari DB: `{count}` akun."
+            caption=f"📄 *REKAP UPDATE REALTIME (REJECTED)*\n• User: {u_text}\n• Total akun ditolak: `{count}` akun."
         )
 
         await query.edit_message_text(
-            f"❌ *REJECT TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` telah ditolak dan dihapus dari database.\n📌 *Alasan:* {chosen_reason}\nFile rekap .txt realtime telah dikirimkan ke chat.",
+            f"❌ *REJECT TERPILIH BERHASIL!*\n\nTotal `{count}` akun dari User `{target_uid}` telah ditolak (REJECTED).\n📌 *Alasan:* {chosen_reason}\nFile rekap .txt realtime telah dikirimkan ke chat.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali ke Daftar User", callback_data="admin_setoran")]]),
             parse_mode='Markdown'
         )
@@ -1458,7 +1529,7 @@ async def render_admin_users_list(query, page=1):
     conn = get_db()
     cursor = conn.cursor()
     
-    # Hanya menampilkan setoran berstatus PENDING dan PROCESSING (APPROVED tidak dimunculkan di daftar aktif)
+    # Hanya menampilkan setoran berstatus PENDING dan PROCESSING
     cursor.execute('''
         SELECT d.user_id, u.username, COUNT(d.id) AS active_count
         FROM deposits d
@@ -1631,6 +1702,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     status_icon = "🔄 PROCESSING (Sudah Rekap)"
                 elif st == "APPROVED":
                     status_icon = "✅ APPROVED (Saldo Masuk)"
+                elif st == "REJECTED":
+                    status_icon = "❌ REJECTED (Ditolak)"
                 
                 waktu = dt if dt else get_wib_time()
                 harga_str = f"Rp {pr:,}" if pr else "Rp 4.000"
@@ -1899,7 +1972,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 dep_id, target_uid = row
                 cursor.execute("UPDATE deposits SET status = 'REJECTED' WHERE id = %s", (dep_id,))
                 success_count += 1
-                
                 if target_uid not in user_notif_map:
                     user_notif_map[target_uid] = []
                 user_notif_map[target_uid].append(email)
@@ -1910,17 +1982,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
-        delete_rejected_deposits()
-
-        for target_uid, emails in user_notif_map.items():
+        for target_uid, email_list in user_notif_map.items():
             try:
-                email_list_str = "\n".join([f"• `{e}`" for e in emails])
+                email_list_str = "\n".join([f"• `{e}`" for e in email_list])
                 await context.bot.send_message(
                     chat_id=target_uid,
                     text=(
                         f"❌ *PEMBERITAHUAN PENOLAKAN GMAIL*\n"
                         f"═══════════════════════\n"
-                        f"⚠️ Sejumlah {len(emails)} akun setoran Anda ditolak:\n"
+                        f"⚠️ Sejumlah {len(email_list)} akun setoran Anda ditolak:\n"
                         f"{email_list_str}\n\n"
                         f"📌 *Alasan Ditolak:* {chosen_reason}\n"
                         f"═══════════════════════\n"
@@ -1933,10 +2003,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data.clear()
         await update.message.reply_text(
-            f"✅ *AUTO REJECT MASSAL GLOBAL BERHASIL!*\n\n"
-            f"• Berhasil di-reject, dihapus dari DB & dinotifikasi: `{success_count}` akun dari `{len(user_notif_map)}` user\n"
-            f"• Tidak cocok / bukan status aktif: `{not_found_count}` akun\n"
-            f"• Alasan: {chosen_reason}",
+            f"❌ *AUTO REJECT MASSAL GLOBAL BERHASIL!*\n\n"
+            f"• Berhasil di-REJECT: `{success_count}` akun dari `{len(user_notif_map)}` user\n"
+            f"• Tidak cocok / bukan status Active: `{not_found_count}` akun\n"
+            f"📌 *Alasan Ditolak:* {chosen_reason}",
             reply_markup=main_menu_keyboard(user.id),
             parse_mode='Markdown'
         )
@@ -1970,8 +2040,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success_count = 0
         not_found_count = 0
-        user_approve_map = {}
-        total_payout_sum = 0
+        user_added_map = {}
 
         for email in emails_to_approve:
             cursor.execute("SELECT id, user_id, price FROM deposits WHERE TRIM(LOWER(gmail)) = TRIM(LOWER(%s)) AND status IN ('PENDING', 'PROCESSING')", (email,))
@@ -1979,18 +2048,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if row:
                 dep_id, target_uid, item_price = row
-                item_price_val = item_price if item_price else 4000
+                actual_price = item_price if item_price else 4000
                 
                 cursor.execute("UPDATE deposits SET status = 'APPROVED' WHERE id = %s", (dep_id,))
-                cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (item_price_val, target_uid))
+                cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (actual_price, target_uid))
                 
                 success_count += 1
-                total_payout_sum += item_price_val
-                
-                if target_uid not in user_approve_map:
-                    user_approve_map[target_uid] = {'count': 0, 'added_balance': 0}
-                user_approve_map[target_uid]['count'] += 1
-                user_approve_map[target_uid]['added_balance'] += item_price_val
+                if target_uid not in user_added_map:
+                    user_added_map[target_uid] = {'count': 0, 'total_price': 0}
+                user_added_map[target_uid]['count'] += 1
+                user_added_map[target_uid]['total_price'] += actual_price
             else:
                 not_found_count += 1
 
@@ -1998,16 +2065,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.close()
         conn.close()
 
-        for target_uid, data_acc in user_approve_map.items():
-            app_cnt = data_acc['count']
-            tot_added = data_acc['added_balance']
+        for target_uid, data_acc in user_added_map.items():
             try:
+                cnt = data_acc['count']
+                tot_p = data_acc['total_price']
                 await context.bot.send_message(
                     chat_id=target_uid,
                     text=(
                         f"🎉 *SETORAN DI-APPROVE!*\n\n"
-                        f"Sebanyak *{app_cnt} akun Gmail* kamu telah diverifikasi dan disetujui oleh admin.\n"
-                        f"💰 *+Rp {tot_added:,}* telah masuk ke saldo cair kamu!"
+                        f"Sebanyak *{cnt} akun Gmail* kamu telah diverifikasi dan disetujui oleh admin.\n"
+                        f"💰 *+Rp {tot_p:,}* telah masuk ke saldo cair kamu!"
                     ),
                     parse_mode='Markdown'
                 )
@@ -2017,32 +2084,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         await update.message.reply_text(
             f"✅ *AUTO APPROVE MASSAL GLOBAL BERHASIL!*\n\n"
-            f"• Berhasil di-approve & ditambah saldo: `{success_count}` akun untuk `{len(user_approve_map)}` user\n"
-            f"• Tidak cocok / bukan status aktif: `{not_found_count}` akun\n"
-            f"• Total nominal dikreditkan: Rp {total_payout_sum:,}",
+            f"• Berhasil di-APPROVE: `{success_count}` akun untuk `{len(user_added_map)}` user\n"
+            f"• Tidak cocok / bukan status Active: `{not_found_count}` akun",
             reply_markup=main_menu_keyboard(user.id),
             parse_mode='Markdown'
         )
         return
 
+    # --- PROSES INPUT NOMOR REKENING WITHDRAW ---
     if current_mode == 'WAITING_REK':
-        context.user_data['wd_rekening'] = text
-        context.user_data['mode'] = 'WAITING_AN'
-
-        pesan = (
-            f"👤 *INPUT NAMA ATAS NAMA (A/N)*\n"
-            f"═══════════════════════\n"
-            f"📌 *No Rek/HP:* `{text}`\n\n"
-            f"Silakan *ketik dan kirimkan Nama Pemilik (Atas Nama)* dari rekening/e-wallet kamu:"
-        )
-        await update.message.reply_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
-        return
-
-    elif current_mode == 'WAITING_AN':
-        atas_nama = text
-        rekening = context.user_data.get('wd_rekening', '-')
+        rek_input = text
         nominal = context.user_data.get('wd_nominal', 0)
-        metode = context.user_data.get('wd_metode', '-')
+        metode = context.user_data.get('wd_metode', 'DANA')
 
         conn = get_db()
         cursor = conn.cursor()
@@ -2051,236 +2104,240 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = res[0] if res else 0
 
         if balance < nominal:
-            await update.message.reply_text("❌ Saldo tidak mencukupi untuk melakukan penarikan ini.", reply_markup=main_menu_keyboard(user.id))
-            context.user_data.clear()
+            await update.message.reply_text("❌ Saldo kamu tidak mencukupi untuk melakukan penarikan ini.", reply_markup=back_keyboard())
             cursor.close()
             conn.close()
+            context.user_data.clear()
             return
 
-        now_str = get_wib_time()
         cursor.execute('UPDATE users SET balance = balance - %s WHERE user_id = %s', (nominal, user.id))
-        cursor.execute('INSERT INTO withdrawals (user_id, nominal, metode, rekening, atas_nama, created_at) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id', 
-                       (user.id, nominal, metode, rekening, atas_nama, now_str))
+        wib_time = get_wib_time()
+        
+        atas_nama = user.first_name if user.first_name else "User Bot"
+        cursor.execute(
+            'INSERT INTO withdrawals (user_id, nominal, metode, rekening, atas_nama, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id',
+            (user.id, nominal, metode, rek_input, atas_nama, 'PENDING', wib_time)
+        )
         wd_id = cursor.fetchone()[0]
         conn.commit()
         cursor.close()
         conn.close()
 
-        username_txt = f"@{user.username}" if user.username else "No Username"
-        keyboard_admin = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(f"✅ Approve #WD{wd_id}", callback_data=f"accwd_{wd_id}"),
-                InlineKeyboardButton(f"❌ Reject #WD{wd_id} (Refund)", callback_data=f"rejwd_{wd_id}")
-            ]
-        ])
-
-        laporan_admin = (
-            f"💸 *PERMINTAAN PENARIKAN DANA*\n"
+        context.user_data.clear()
+        await update.message.reply_text(
+            f"✅ *PERMINTAAN PENARIKAN BERHASIL DIKIRIM!*\n"
             f"═══════════════════════\n"
             f"🆔 *ID WD:* `#WD{wd_id}`\n"
-            f"👤 *Pengirim:* {user.first_name} ({username_txt})\n"
-            f"🆔 *ID Telegram:* `{user.id}`\n"
             f"💵 *Nominal:* Rp {nominal:,}\n"
             f"🏦 *Metode:* {metode}\n"
-            f"📌 *No Rek/HP:* `{rekening}`\n"
+            f"📌 *No Rek/HP:* `{rek_input}`\n"
             f"👤 *A/N:* `{atas_nama}`\n"
-            f"🕒 *Waktu:* `{now_str}`\n"
-            f"═══════════════════════"
+            f"🕒 *Waktu:* `{wib_time}`\n"
+            f"═══════════════════════\n"
+            f"Mohon tunggu, admin akan segera memproses penarikan dana kamu.",
+            reply_markup=main_menu_keyboard(user.id),
+            parse_mode='Markdown'
         )
+
         try:
-            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=laporan_admin, reply_markup=keyboard_admin, parse_mode='Markdown')
+            u_tag = f"@{user.username}" if user.username else f"ID: `{user.id}`"
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"🚨 *PERMINTAAN WITHDRAW BARU!* 🚨\n\n"
+                    f"🆔 *ID WD:* `#WD{wd_id}`\n"
+                    f"👤 *User:* {u_tag}\n"
+                    f"💵 *Nominal:* Rp {nominal:,}\n"
+                    f"🏦 *Metode:* {metode}\n"
+                    f"📌 *No Rek/HP:* `{rek_input}`\n"
+                    f"👤 *A/N:* `{atas_nama}`\n"
+                    f"🕒 *Waktu:* `{wib_time}`"
+                ),
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(f"✅ Approve #WD{wd_id}", callback_data=f"accwd_{wd_id}"),
+                        InlineKeyboardButton(f"❌ Reject #WD{wd_id}", callback_data=f"rejwd_{wd_id}")
+                    ]
+                ]),
+                parse_mode='Markdown'
+            )
         except Exception:
             pass
-
-        context.user_data.clear()
-        await update.message.reply_text(
-            f"✅ *PENARIKAN BERHASIL DIAJUKAN!*\n\n"
-            f"🆔 ID WD: `#WD{wd_id}`\n"
-            f"💵 Nominal: *Rp {nominal:,}*\n"
-            f"🏦 Metode: *{metode}*\n"
-            f"📌 No Rek/HP: `{rekening}`\n"
-            f"👤 Atas Nama: `{atas_nama}`\n\n"
-            f"Permintaan penarikan kamu sedang diproses oleh admin. Cek statusnya secara berkala melalui menu *Riwayat Withdraw*.",
-            reply_markup=main_menu_keyboard(user.id),
-            parse_mode='Markdown'
-        )
         return
 
-    if not current_mode:
-        await update.message.reply_text(
-            "⚠️ Silakan pilih tombol **Setor Satuan** atau **Setor Bulking** terlebih dahulu pada menu utama.",
-            reply_markup=main_menu_keyboard(user.id),
-            parse_mode='Markdown'
-        )
-        return
+    # --- PROSES INPUT SETORAN SATUAN ---
+    if current_mode == 'SATUAN':
+        active_pwds = get_active_passwords()
+        if not active_pwds:
+            await update.message.reply_text("❌ Mohon maaf, setoran sedang ditutup.", reply_markup=main_menu_keyboard(user.id))
+            return
 
-    items_to_process = []
-    is_bulking_mode = (current_mode == 'BULKING_INPUT_EMAILS')
-    bulk_password_used = context.user_data.get('bulk_password') if is_bulking_mode else None
-    bulk_price_used = context.user_data.get('bulk_price', 4000) if is_bulking_mode else 4000
+        items_to_process = []
+        for line in lines:
+            if ':' in line:
+                parts = line.split(':', 1)
+                g_mail = parts[0].strip().lower()
+                p_ass = parts[1].strip()
+                if '@gmail.com' in g_mail:
+                    items_to_process.append((g_mail, p_ass))
 
-    active_pwds = get_active_passwords()
+        if not items_to_process:
+            await update.message.reply_text(
+                "❌ *Format tidak sesuai!*\n"
+                "Gunakan format: `email@gmail.com:password`\n\n"
+                "Silakan kirim ulang data yang benar.",
+                reply_markup=cancel_keyboard(),
+                parse_mode='Markdown'
+            )
+            return
 
-    if is_bulking_mode and bulk_password_used not in active_pwds:
-        await update.message.reply_text(f"❌ Sandi `{bulk_password_used}` sedang dinonaktifkan oleh Admin!", reply_markup=main_menu_keyboard(user.id))
-        context.user_data.clear()
-        return
-
-    for line in lines:
-        line_clean = line.strip()
-        if not line_clean:
-            continue
-
-        extracted_email = ""
-        extracted_pwd = ""
-
-        if ':' in line_clean:
-            parts = line_clean.split(':', 1)
-            extracted_email = parts[0].strip().lower()
-            extracted_pwd = parts[1].strip()
-        else:
-            extracted_email = line_clean.strip().lower()
-
-        if extracted_email.endswith('@gmail.com') and len(extracted_email) > 10:
-            if current_mode == 'SATUAN':
-                if extracted_pwd in active_pwds:
-                    items_to_process.append((extracted_email, extracted_pwd, active_pwds[extracted_pwd]))
-            elif is_bulking_mode:
-                items_to_process.append((extracted_email, bulk_password_used, bulk_price_used))
-
-    total_input_count = len(items_to_process)
-    if is_bulking_mode and total_input_count > MAX_BULK_LIMIT:
-        items_to_process = items_to_process[:MAX_BULK_LIMIT]
-
-    if items_to_process:
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO users (user_id, username) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING', (user.id, user.username))
-        
+
         inserted_count = 0
         duplicate_count = 0
-        total_batch_price = 0
-        seen_batch_emails = set()
+        invalid_pwd_count = 0
+        details_inserted = []
 
-        for gmail, password, price_val in items_to_process:
-            gmail_clean = gmail.strip().lower()
+        wib_time = get_wib_time()
 
-            if gmail_clean in seen_batch_emails:
-                duplicate_count += 1
+        for g_mail, p_ass in items_to_process:
+            p_ass_lower = p_ass.lower()
+            matched_pwd = None
+            
+            for act_p in active_pwds.keys():
+                if act_p.lower() == p_ass_lower:
+                    matched_pwd = act_p
+                    break
+
+            if not matched_pwd:
+                invalid_pwd_count += 1
                 continue
-            seen_batch_emails.add(gmail_clean)
 
-            cursor.execute('SELECT id FROM deposits WHERE TRIM(LOWER(gmail)) = TRIM(LOWER(%s))', (gmail_clean,))
-            if cursor.fetchone():
-                duplicate_count += 1
-                continue
-
-            now_str = get_wib_time()
+            price_for_this = active_pwds[matched_pwd]
 
             try:
-                cursor.execute("INSERT INTO deposits (user_id, gmail, password, status, created_at, price) VALUES (%s, %s, %s, 'PENDING', %s, %s)", 
-                               (user.id, gmail_clean, password, now_str, price_val))
+                cursor.execute(
+                    'INSERT INTO deposits (user_id, gmail, password, status, created_at, price) VALUES (%s, %s, %s, %s, %s, %s)',
+                    (user.id, g_mail, matched_pwd, 'PENDING', wib_time, price_for_this)
+                )
+                conn.commit()
                 inserted_count += 1
-                total_batch_price += price_val
+                details_inserted.append(f"• `{g_mail}` (Rp {price_for_this:,})")
             except psycopg2.IntegrityError:
                 conn.rollback()
                 duplicate_count += 1
-                cursor = conn.cursor()
-                continue
+            except Exception:
+                conn.rollback()
 
-        conn.commit()
         cursor.close()
         conn.close()
+
         context.user_data.clear()
 
+        pesan_balasan = f"📥 *LAPORAN SETORAN SATUAN*\n═══════════════════════\n"
         if inserted_count > 0:
-            username_txt = f"@{user.username}" if user.username else f"User_{user.id}"
-            mode_label = "BULKING" if is_bulking_mode else "SATUAN"
-            
-            txt_file, filename = generate_user_txt_rekap(user.id, username_txt)
-
-            laporan_admin_text = (
-                f"📥 *SETORAN {mode_label} BARU MASUK*\n"
-                f"═══════════════════════\n"
-                f"👤 *User:* {user.first_name} ({username_txt})\n"
-                f"📦 *Akun Baru Masuk:* `{inserted_count}` Akun\n"
-                f"💰 *Estimasi Nilai:* Rp {total_batch_price:,}\n"
-                f"═══════════════════════\n"
-                f"📄 *File .txt di atas berisi seluruh daftar setoran aktif & riwayat lengkap user tanpa ada yang hilang.*"
-            )
-
-            try:
-                await context.bot.send_document(
-                    chat_id=ADMIN_CHAT_ID,
-                    document=txt_file,
-                    filename=filename,
-                    caption=laporan_admin_text,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ Buka Panel Admin", callback_data="admin_panel")]]),
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                print(f"Gagal mengirim dokumen setoran ke admin: {e}")
-        
-        msg_response = ""
-        if inserted_count > 0:
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*), COALESCE(SUM(price), 0) FROM deposits WHERE user_id = %s AND status IN ('PENDING', 'PROCESSING')", (user.id,))
-            row_act = cursor.fetchone()
-            total_active_count = row_act[0]
-            total_active_est = row_act[1]
-            cursor.close()
-            conn.close()
-
-            msg_response += (
-                f"✅ *AKUN BERHASIL TERKIRIM & DIARKIBKAN!*\n\n"
-                f"📩 Total `{inserted_count}` akun baru ditambahkan (Status: Pending).\n"
-                f"📂 Total akumulasi akun aktif (Pending + Processing) Anda: `{total_active_count}` akun.\n"
-                f"⏳ Estimasi saldo tertahan: *Rp {total_active_est:,}*\n"
-            )
+            pesan_balasan += f"✅ *Berhasil Disetor:* {inserted_count} Akun\n" + "\n".join(details_inserted) + "\n\n"
         if duplicate_count > 0:
-            msg_response += f"\n⚠️ *AUTO REJECT:* `{duplicate_count}` akun ditolak otomatis oleh sistem karena akun/Gmail tersebut sudah pernah terdaftar di database (Anti-Kecurangan)."
+            pesan_balasan += f"⚠️ *Duplikat (Sudah Pernah Disetor):* {duplicate_count} Akun\n"
+        if invalid_pwd_count > 0:
+            pesan_balasan += f"❌ *Password Tidak Aktif / Salah Rules:* {invalid_pwd_count} Akun\n"
 
-        if is_bulking_mode and total_input_count > MAX_BULK_LIMIT:
-            msg_response += (
-                f"\n\n📌 *Catatan Batas Bulking:*\n"
-                f"Teks yang Anda kirim berisi {total_input_count} akun valid. Bot secara otomatis memproses *{MAX_BULK_LIMIT} akun pertama* agar bot tidak macet.\n"
-                f"Silakan klik **📦 Setor Bulking** kembali untuk menyetor sisa akun berikutnya."
+        pesan_balasan += f"═══════════════════════\n🕒 *Waktu Setor:* `{wib_time}`"
+        await update.message.reply_text(pesan_balasan, reply_markup=main_menu_keyboard(user.id), parse_mode='Markdown')
+        return
+
+    # --- PROSES INPUT SETORAN BULKING ---
+    if current_mode == 'BULKING_INPUT_EMAILS':
+        chosen_password = context.user_data.get('bulk_password')
+        active_pwds = get_active_passwords()
+
+        if chosen_password not in active_pwds:
+            await update.message.reply_text(f"❌ Sandi `{chosen_password}` sudah tidak aktif!", reply_markup=main_menu_keyboard(user.id))
+            return
+
+        bulk_price = active_pwds[chosen_password]
+
+        raw_emails = []
+        for line in lines:
+            line_clean = line.strip()
+            if ':' in line_clean:
+                line_clean = line_clean.split(':')[0].strip()
+            
+            if '@gmail.com' in line_clean.lower():
+                raw_emails.append(line_clean.lower())
+
+        if not raw_emails:
+            await update.message.reply_text(
+                "❌ *Daftar Gmail tidak ditemukan atau format salah!*\n"
+                "Kirimkan list email gmail (satu per baris).",
+                reply_markup=cancel_keyboard(),
+                parse_mode='Markdown'
             )
+            return
 
-        await update.message.reply_text(
-            msg_response,
-            reply_markup=main_menu_keyboard(user.id),
-            parse_mode='Markdown'
-        )
-    else:
-        allowed_str = ", ".join([f"`{p}`" for p in active_pwds.keys()]) if active_pwds else "Tidak ada"
-        error_msg = (
-            f"❌ *FORMAT LIST / SANDI TIDAK VALID!*\n\n"
-            f"⚠️ Pastikan sandi yang digunakan sesuai dengan daftar sandi yang **aktif** hari ini: {allowed_str}.\n\n"
-            f"🌐 Silakan cek terlebih dahulu di web *netnit.net*:\n"
-            f"1. Masuk dan lakukan **Quick Fix Issue** pada akun Anda.\n"
-            f"2. Pastikan status akun di sana sudah **Wajib GOOD semua** sebelum disetor ulang ke bot ini!"
-        )
-        await update.message.reply_text(
-            error_msg,
-            reply_markup=cancel_keyboard(),
-            parse_mode='Markdown'
-        )
+        if len(raw_emails) > MAX_BULK_LIMIT:
+            await update.message.reply_text(
+                f"⚠️ *Jumlah akun melebihi batas bulking!*\n"
+                f"Maksimal bulking adalah *{MAX_BULK_LIMIT} akun* sekali kirim.\n"
+                f"Kamu mengirimkan *{len(raw_emails)} akun*. Silakan kurangi list kamu.",
+                reply_markup=cancel_keyboard(),
+                parse_mode='Markdown'
+            )
+            return
 
-async def post_init(application):
+        conn = get_db()
+        cursor = conn.cursor()
+
+        inserted_count = 0
+        duplicate_count = 0
+        wib_time = get_wib_time()
+
+        for g_mail in raw_emails:
+            try:
+                cursor.execute(
+                    'INSERT INTO deposits (user_id, gmail, password, status, created_at, price) VALUES (%s, %s, %s, %s, %s, %s)',
+                    (user.id, g_mail, chosen_password, 'PENDING', wib_time, bulk_price)
+                )
+                conn.commit()
+                inserted_count += 1
+            except psycopg2.IntegrityError:
+                conn.rollback()
+                duplicate_count += 1
+            except Exception:
+                conn.rollback()
+
+        cursor.close()
+        conn.close()
+
+        context.user_data.clear()
+
+        pesan_balasan = (
+            f"📦 *LAPORAN SETORAN BULKING*\n"
+            f"═══════════════════════\n"
+            f"🔑 *Password:* `{chosen_password}`\n"
+            f"💵 *Rate:* Rp {bulk_price:,} / Akun\n"
+            f"═══════════════════════\n"
+            f"✅ *Berhasil Disetor:* {inserted_count} Akun\n"
+        )
+        if duplicate_count > 0:
+            pesan_balasan += f"⚠️ *Duplikat (Sudah Pernah Disetor):* {duplicate_count} Akun\n"
+
+        pesan_balasan += f"═══════════════════════\n🕒 *Waktu Setor:* `{wib_time}`"
+        await update.message.reply_text(pesan_balasan, reply_markup=main_menu_keyboard(user.id), parse_mode='Markdown')
+        return
+
+def main():
     init_db()
-    delete_rejected_deposits()
-    await application.bot.set_my_commands([
-        BotCommand("start", "🔄 Tampilkan Menu Utama / Refresh Bot")
-    ])
 
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT | filters.Document.ALL, handle_message))
 
-    print("Bot Setoran V30 Aktif (System Auto Reject Fraud & Dynamic Price Activated)...")
+    print("🤖 Bot Setoran Gmail V30 Berhasil Berjalan...")
     app.run_polling()
+
+if __name__ == '__main__':
+    main()
