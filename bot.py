@@ -2216,7 +2216,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             u_res = cursor.fetchone()
             uname = u_res[0] if u_res else None
             u_text = f"@{uname}" if uname else f"User_{uid}"
-            
+
             txt_file, filename = generate_user_txt_rekap(uid, u_text)
             try:
                 await context.bot.send_document(
@@ -2237,7 +2237,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Total Email Di-paste: `{len(emails_to_approve)}` akun\n"
             f"• Berhasil Di-Approve: `{len(found_ids)}` akun\n"
             f"• Total User Terdampak: `{len(user_credits)}` user\n\n"
-            f"Saldo masing-masing user telah bertambah dan file rekap .txt realtime telah dikirimkan di atas.",
+            f"File rekap .txt realtime untuk masing-masing user telah dikirimkan di atas.",
             reply_markup=main_menu_keyboard(user.id),
             parse_mode='Markdown'
         )
@@ -2279,10 +2279,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Tidak ada akun setoran yang terdeteksi cocok dalam status PENDING/PROCESSING di database.", reply_markup=cancel_keyboard())
             return
 
-        found_ids = [r[0] for r in found_rows]
         user_rejected_emails = {}
+        found_ids = []
 
         for dep_id, uid, gm in found_rows:
+            found_ids.append(dep_id)
             if uid not in user_rejected_emails:
                 user_rejected_emails[uid] = []
             user_rejected_emails[uid].append(gm)
@@ -2291,16 +2292,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute(f"UPDATE deposits SET status = 'REJECTED' WHERE id IN ({update_placeholders})", tuple(found_ids))
         conn.commit()
 
-        for uid, rej_list in user_rejected_emails.items():
+        for uid, rejected_list in user_rejected_emails.items():
             try:
-                email_list_str = "\n".join([f"• `{e}`" for e in rej_list])
+                email_list_str = "\n".join([f"• `{e}`" for e in rejected_list[:20]])
+                extra_note = f"\n_...dan {len(rejected_list) - 20} akun lainnya._" if len(rejected_list) > 20 else ""
+                
                 await context.bot.send_message(
                     chat_id=uid,
                     text=(
                         f"❌ *PEMBERITAHUAN PENOLAKAN GMAIL*\n"
                         f"═══════════════════════\n"
-                        f"⚠️ Sejumlah {len(rej_list)} akun setoran Anda ditolak:\n"
-                        f"{email_list_str}\n\n"
+                        f"⚠️ Sejumlah {len(rejected_list)} akun setoran Anda ditolak:\n"
+                        f"{email_list_str}{extra_note}\n\n"
                         f"📌 *Alasan Ditolak:* {chosen_reason}\n"
                         f"═══════════════════════\n"
                         f"Silakan periksa kembali akun Anda."
@@ -2315,7 +2318,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             u_res = cursor.fetchone()
             uname = u_res[0] if u_res else None
             u_text = f"@{uname}" if uname else f"User_{uid}"
-            
+
             txt_file, filename = generate_user_txt_rekap(uid, u_text)
             try:
                 await context.bot.send_document(
@@ -2335,17 +2338,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ *AUTO REJECT MASSAL BERHASIL!*\n\n"
             f"• Total Email Di-paste: `{len(emails_to_reject)}` akun\n"
             f"• Berhasil Di-Reject: `{len(found_ids)}` akun\n"
-            f"• Total User Terdampak: `{len(user_rejected_emails)}` user\n\n"
+            f"• Total User Terdampak: `{len(user_rejected_emails)}` user\n"
+            f"📌 *Alasan:* {chosen_reason}\n\n"
             f"File rekap .txt realtime untuk masing-masing user telah dikirimkan di atas.",
             reply_markup=main_menu_keyboard(user.id),
             parse_mode='Markdown'
         )
         return
 
-    # Default Fallback jika tidak dalam mode apapun
-    await update.message.reply_text("Pilih menu di bawah ini untuk berinteraksi:", reply_markup=main_menu_keyboard(user.id))
+    # Default callback jika pesan biasa dikirim tanpa mode khusus
+    await update.message.reply_text("Silakan pilih menu yang tersedia di papan menu cepat atau navigasi tombol di bawah.", reply_markup=persistent_reply_keyboard())
 
-# ----------------- MAIN ENTRY POINT -----------------
+# ----------------- MAIN FUNCTION -----------------
 def main():
     init_db()
     
@@ -2353,9 +2357,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT | filters.Document.MimeType("text/plain"), handle_message))
+    app.add_handler(MessageHandler(filters.TEXT | filters.Document.MimeType("text/plain") | filters.Document.FileExtension("txt"), handle_message))
 
-    print("Bot Setoran Gmail V30 Berhasil Dijalankan...")
+    print("Bot Setoran Gmail V30 Berhasil Berjalan...")
     app.run_polling()
 
 if __name__ == '__main__':
