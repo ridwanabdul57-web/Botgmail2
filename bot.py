@@ -2,11 +2,15 @@ import io
 import os
 import re
 import math
+import logging
 import unicodedata
 from datetime import datetime, timezone, timedelta
 import psycopg2
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+
+# Logging setup
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8966364905:AAEJKwW7MFa7rV0oI53gtxKUZEiuTHp0_5M')
 ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', 8359903974))
@@ -14,6 +18,9 @@ CS_USERNAME = 'bossgmailbotcs'
 MAX_BULK_LIMIT = 50
 ITEMS_PER_PAGE_USERS = 5   # Jumlah user per slide halaman admin
 ITEMS_PER_PAGE_DEPS = 10   # Jumlah akun per slide halaman verifikasi user
+
+# Default Connection String dari Railway
+DEFAULT_DB_URL = "postgresql://postgres:EgfAUQNyvdMlltxUVPygkkBPuDBxoIOv@altaria.proxy.rlwy.net:53430/railway"
 
 DEFAULT_WELCOME_TEXT = (
     "✨ *SELAMAT DATANG DI BOT SETORAN GMAIL V30* ✨\n"
@@ -67,9 +74,7 @@ REJECT_REASONS = [
 
 # ----------------- DATABASE SETUP -----------------
 def get_db():
-    db_url = os.getenv('DATABASE_URL')
-    if not db_url:
-        raise ValueError("DATABASE_URL belum diisi di Variable Environment Railway!")
+    db_url = os.getenv('DATABASE_URL', DEFAULT_DB_URL)
     conn = psycopg2.connect(db_url)
     return conn
 
@@ -141,25 +146,28 @@ def init_db():
         conn.close()
 
 def delete_rejected_deposits():
+    conn = None
     try:
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM deposits WHERE status = 'REJECTED'")
         conn.commit()
         cursor.close()
-        conn.close()
     except Exception as e:
         print(f"Error deleting rejected deposits: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def get_all_passwords_info():
     pass_info = {}
+    conn = None
     try:
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute("SELECT key, value FROM bot_settings WHERE key LIKE 'pwd_%'")
         rows = cursor.fetchall()
         cursor.close()
-        conn.close()
         
         db_data = {r[0]: r[1] for r in rows}
         for pwd, (def_st, def_pr) in DEFAULT_MASTER_PASSWORDS.items():
@@ -169,6 +177,9 @@ def get_all_passwords_info():
     except Exception:
         for pwd, (def_st, def_pr) in DEFAULT_MASTER_PASSWORDS.items():
             pass_info[pwd] = {'status': def_st, 'price': def_pr}
+    finally:
+        if conn:
+            conn.close()
     return pass_info
 
 def set_password_status(password: str, status: str):
@@ -192,17 +203,20 @@ def get_active_passwords():
     return {pwd: data['price'] for pwd, data in info.items() if data['status'] == 'ACTIVE'}
 
 def get_welcome_text_db():
+    conn = None
     try:
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute("SELECT value FROM bot_settings WHERE key = 'welcome_text'")
         res = cursor.fetchone()
         cursor.close()
-        conn.close()
         if res and res[0]:
             return res[0]
     except Exception:
         pass
+    finally:
+        if conn:
+            conn.close()
     return DEFAULT_WELCOME_TEXT
 
 def set_welcome_text_db(text: str):
@@ -1871,6 +1885,99 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_lines = cleaned_text.split('\n')
     lines = [line.strip() for line in raw_lines if line.strip()]
 
+    # --- HANDLER INPUT REKENING WITHDRAW USER ---
+    if current_mode == 'WAITING_REK':
+        nominal = context.user_data.get('wd_nominal', 0)
+        metode = context.user_data.get('wd_metode', 'DANA')
+        rekening = text
+
+        context.user_data['wd_rekening'] = rekening
+        context.user_data['mode'] = 'WAITING_AN'
+
+        pesan = (
+            f"👤 *INPUT ATAS NAMA REKENING*\n"
+            f"═══════════════════════\n"
+            f"💵 *Nominal:* Rp {nominal:,}\n"
+            f"🏦 *Metode:* {metode}\n"
+            f"📌 *No Rek/HP:* `{rekening}`\n\n"
+            f"Silakan *ketik dan kirimkan nama pemilik rekening/e-wallet*:"
+        )
+        await update.message.reply_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    if current_mode == 'WAITING_AN':
+        nominal = context.user_data.get('wd_nominal', 0)
+        metode = context.user_data.get('wd_metode', 'DANA')
+        rekening = context.user_data.get('wd_rekening', '')
+        atas_nama = text
+
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT balance FROM users WHERE user_id = %s', (user.id,))
+        res = cursor.fetchone()
+        balance = res[0] if res else 0
+
+        if balance < nominal:
+            cursor.close()
+            conn.close()
+            context.user_data.clear()
+            await update.message.reply_text("❌ Saldo Anda tidak mencukupi untuk melakukan penarikan ini.", reply_markup=back_keyboard())
+            return
+
+        cursor.execute('UPDATE users SET balance = balance - %s WHERE user_id = %s', (nominal, user.id))
+        wib_now = get_wib_time()
+        
+        cursor.execute('''
+            INSERT INTO withdrawals (user_id, nominal, metode, rekening, atas_nama, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, 'PENDING', %s)
+            RETURNING id
+        ''', (user.id, nominal, metode, rekening, atas_nama, wib_now))
+        
+        wd_id = cursor.fetchone()[0]
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        context.user_data.clear()
+
+        pesan_user = (
+            f"✅ *PERMINTAAN PENARIKAN DANA TERKIRIM*\n"
+            f"═══════════════════════\n"
+            f"🆔 *ID WD:* `#WD{wd_id}`\n"
+            f"💵 *Nominal:* Rp {nominal:,}\n"
+            f"🏦 *Metode:* {metode}\n"
+            f"📌 *No Rek/HP:* `{rekening}`\n"
+            f"👤 *A/N:* `{atas_nama}`\n"
+            f"🕒 *Waktu:* `{wib_now}`\n"
+            f"═══════════════════════\n"
+            f"Permintaan Anda sedang diproses oleh Admin. Mohon tunggu informasi selanjutnya."
+        )
+        await update.message.reply_text(pesan_user, reply_markup=back_keyboard(), parse_mode='Markdown')
+
+        # Notifikasi ke Admin
+        try:
+            u_txt = f"@{user.username}" if user.username else f"ID: `{user.id}`"
+            pesan_admin = (
+                f"🔔 *PERMINTAAN WITHDRAW BARU (#WD{wd_id})*\n"
+                f"═══════════════════════\n"
+                f"👤 *User:* {u_txt}\n"
+                f"💵 *Nominal:* Rp {nominal:,}\n"
+                f"🏦 *Metode:* {metode}\n"
+                f"📌 *No Rek/HP:* `{rekening}`\n"
+                f"👤 *A/N:* `{atas_nama}`\n"
+                f"🕒 *Waktu:* `{wib_now}`"
+            )
+            keyboard_admin = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(f"✅ Approve #WD{wd_id}", callback_data=f"accwd_{wd_id}"),
+                    InlineKeyboardButton(f"❌ Reject #WD{wd_id}", callback_data=f"rejwd_{wd_id}")
+                ]
+            ])
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=pesan_admin, reply_markup=keyboard_admin, parse_mode='Markdown')
+        except Exception as e:
+            print(f"Failed to notify admin: {e}")
+        return
+
     # --- HANDLER MODES USER SETORAN ---
     if current_mode in ['SATUAN', 'BULKING_INPUT_EMAILS']:
         fixed_pwd = context.user_data.get('bulk_password')
@@ -2228,112 +2335,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ *AUTO REJECT MASSAL BERHASIL!*\n\n"
             f"• Total Email Di-paste: `{len(emails_to_reject)}` akun\n"
             f"• Berhasil Di-Reject: `{len(found_ids)}` akun\n"
-            f"• Total User Terdampak: `{len(user_rejected_emails)}` user\n"
-            f"• Alasan: *{chosen_reason}*\n\n"
-            f"Pemberitahuan telah dikirimkan ke user terkait dan file rekap .txt realtime telah dikirimkan di atas.",
+            f"• Total User Terdampak: `{len(user_rejected_emails)}` user\n\n"
+            f"File rekap .txt realtime untuk masing-masing user telah dikirimkan di atas.",
             reply_markup=main_menu_keyboard(user.id),
             parse_mode='Markdown'
         )
         return
 
-    # --- PROSES WAITING REK (PENARIKAN DANA) ---
-    if current_mode == 'WAITING_REK':
-        nominal = context.user_data.get('wd_nominal', 0)
-        metode = context.user_data.get('wd_metode', 'DANA')
-        input_rek = text.strip()
+    # Default Fallback jika tidak dalam mode apapun
+    await update.message.reply_text("Pilih menu di bawah ini untuk berinteraksi:", reply_markup=main_menu_keyboard(user.id))
 
-        context.user_data['wd_rekening'] = input_rek
-        context.user_data['mode'] = 'WAITING_AN'
-
-        pesan = (
-            f"👤 *INPUT NAMA PEMILIK (A/N)*\n"
-            f"═══════════════════════\n"
-            f"💵 *Nominal:* Rp {nominal:,}\n"
-            f"🏦 *Metode:* {metode}\n"
-            f"📌 *No Rek/HP:* `{input_rek}`\n\n"
-            f"Silakan *ketik dan kirimkan* Nama Lengkap Pemilik Rekening / E-Wallet:"
-        )
-        await update.message.reply_text(pesan, reply_markup=cancel_keyboard(), parse_mode='Markdown')
-        return
-
-    if current_mode == 'WAITING_AN':
-        nominal = context.user_data.get('wd_nominal', 0)
-        metode = context.user_data.get('wd_metode', 'DANA')
-        rekening = context.user_data.get('wd_rekening', '-')
-        atas_nama = text.strip()
-
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT balance FROM users WHERE user_id = %s', (user.id,))
-        res = cursor.fetchone()
-        current_balance = res[0] if res else 0
-
-        if current_balance < nominal:
-            await update.message.reply_text("❌ Saldo kamu tidak mencukupi untuk melakukan penarikan ini.", reply_markup=back_keyboard())
-            cursor.close()
-            conn.close()
-            context.user_data.clear()
-            return
-
-        cursor.execute('UPDATE users SET balance = balance - %s WHERE user_id = %s', (nominal, user.id))
-        
-        wib_time = get_wib_time()
-        cursor.execute('''
-            INSERT INTO withdrawals (user_id, nominal, metode, rekening, atas_nama, status, created_at)
-            VALUES (%s, %s, %s, %s, %s, 'PENDING', %s)
-            RETURNING id
-        ''', (user.id, nominal, metode, rekening, atas_nama, wib_time))
-        wd_id = cursor.fetchone()[0]
-
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-        context.user_data.clear()
-
-        pesan_user = (
-            f"✅ *PERMINTAAN PENARIKAN DIBUAT!*\n"
-            f"═══════════════════════\n"
-            f"🆔 *ID WD:* `#WD{wd_id}`\n"
-            f"💵 *Nominal:* Rp {nominal:,}\n"
-            f"🏦 *Metode:* {metode}\n"
-            f"📌 *No Rek/HP:* `{rekening}`\n"
-            f"👤 *A/N:* `{atas_nama}`\n"
-            f"🕒 *Waktu:* `{wib_time}`\n"
-            f"═══════════════════════\n"
-            f"Status penarikan kamu saat ini *PENDING*. Admin akan segera mentransfer dana kamu."
-        )
-        await update.message.reply_text(pesan_user, reply_markup=back_keyboard(), parse_mode='Markdown')
-
-        try:
-            u_text = f"@{user.username}" if user.username else f"ID: `{user.id}`"
-            pesan_admin = (
-                f"🔔 *PERMINTAAN WITHDRAW BARU! (#WD{wd_id})*\n"
-                f"═══════════════════════\n"
-                f"👤 *User:* {u_text}\n"
-                f"💵 *Nominal:* Rp {nominal:,}\n"
-                f"🏦 *Metode:* {metode}\n"
-                f"📌 *No Rek/HP:* `{rekening}`\n"
-                f"👤 *A/N:* `{atas_nama}`\n"
-                f"🕒 *Waktu:* `{wib_time}`\n"
-                f"═══════════════════════\n"
-                f"Silakan buka Panel Admin -> Kelola Withdraw Pending untuk memproses."
-            )
-            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=pesan_admin, parse_mode='Markdown')
-        except Exception:
-            pass
-        return
-
+# ----------------- MAIN ENTRY POINT -----------------
 def main():
     init_db()
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT | filters.Document.MimeType("text/plain"), handle_message))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT | filters.Document.MimeType("text/plain"), handle_message))
 
-    print("Bot Telegram Setoran Gmail berhasil dijalankan...")
-    application.run_polling()
+    print("Bot Setoran Gmail V30 Berhasil Dijalankan...")
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
