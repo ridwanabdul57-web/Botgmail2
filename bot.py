@@ -40,6 +40,12 @@ OVERLOAD_WELCOME_TEXT = (
     "Silakan cek berkala menu ini untuk melihat update dibukanya kembali setoran."
 )
 
+def escape_markdown(text: str) -> str:
+    """Utility untuk meloloskan karakter khusus Markdown jika dibutuhkan."""
+    if not text:
+        return ""
+    return str(text).replace('_', '\\_').replace('*', '\\*').replace('`', '\\`').replace('[', '\\[')
+
 def get_wib_time():
     wib_timezone = timezone(timedelta(hours=7))
     return datetime.now(wib_timezone).strftime("%d-%m-%Y %H:%M:%S WIB")
@@ -59,8 +65,6 @@ REJECT_REASONS = [
     "Format / Data Akun Tidak Valid"
 ]
 
-DATABASE_URL = os.getenv('DATABASE_URL')
-
 # ----------------- DATABASE SETUP -----------------
 def get_db():
     db_url = os.getenv('DATABASE_URL')
@@ -72,68 +76,69 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            balance BIGINT DEFAULT 0
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS deposits (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            gmail TEXT UNIQUE,
-            password TEXT,
-            status TEXT DEFAULT 'PENDING',
-            created_at TEXT,
-            price BIGINT DEFAULT 4000
-        )
-    ''')
-    
     try:
-        cursor.execute("ALTER TABLE deposits ADD COLUMN price BIGINT DEFAULT 4000")
-    except Exception:
-        conn.rollback()
-        cursor = conn.cursor()
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS withdrawals (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            nominal BIGINT,
-            metode TEXT,
-            rekening TEXT,
-            atas_nama TEXT,
-            status TEXT DEFAULT 'PENDING',
-            created_at TEXT
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bot_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-
-    for pwd, (default_status, default_price) in DEFAULT_MASTER_PASSWORDS.items():
-        setting_key_st = f"pwd_status_{pwd}"
-        setting_key_pr = f"pwd_price_{pwd}"
-        cursor.execute('INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING', (setting_key_st, default_status))
-        cursor.execute('INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING', (setting_key_pr, str(default_price)))
-
-    cursor.execute('INSERT INTO bot_settings (key, value) VALUES (\'welcome_text\', %s) ON CONFLICT (key) DO NOTHING', (DEFAULT_WELCOME_TEXT,))
-
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dep_user ON deposits(user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_wd_user ON withdrawals(user_id)")
-    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dep_lower_gmail ON deposits(TRIM(LOWER(gmail)))")
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                balance BIGINT DEFAULT 0
+            )
+        ''')
         
-    conn.commit()
-    cursor.close()
-    conn.close()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS deposits (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                gmail TEXT UNIQUE,
+                password TEXT,
+                status TEXT DEFAULT 'PENDING',
+                created_at TEXT,
+                price BIGINT DEFAULT 4000
+            )
+        ''')
+        
+        try:
+            cursor.execute("ALTER TABLE deposits ADD COLUMN price BIGINT DEFAULT 4000")
+        except Exception:
+            conn.rollback()
+            cursor = conn.cursor()
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                nominal BIGINT,
+                metode TEXT,
+                rekening TEXT,
+                atas_nama TEXT,
+                status TEXT DEFAULT 'PENDING',
+                created_at TEXT
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+
+        for pwd, (default_status, default_price) in DEFAULT_MASTER_PASSWORDS.items():
+            setting_key_st = f"pwd_status_{pwd}"
+            setting_key_pr = f"pwd_price_{pwd}"
+            cursor.execute('INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING', (setting_key_st, default_status))
+            cursor.execute('INSERT INTO bot_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING', (setting_key_pr, str(default_price)))
+
+        cursor.execute('INSERT INTO bot_settings (key, value) VALUES (\'welcome_text\', %s) ON CONFLICT (key) DO NOTHING', (DEFAULT_WELCOME_TEXT,))
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_dep_user ON deposits(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_wd_user ON withdrawals(user_id)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dep_lower_gmail ON deposits(TRIM(LOWER(gmail)))")
+            
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
 
 def delete_rejected_deposits():
     try:
@@ -340,7 +345,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO users (user_id, username) VALUES (%s, %s) ON CONFLICT (user_id) DO NOTHING', (user.id, user.username))
+    cursor.execute('INSERT INTO users (user_id, username) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username', (user.id, user.username))
     conn.commit()
     cursor.close()
     conn.close()
@@ -1651,6 +1656,93 @@ async def render_admin_user_deposits(query, target_uid, context, page=1):
     except Exception:
         pass
 
+async def process_user_deposit_input(update: Update, context: ContextTypes.DEFAULT_TYPE, lines, mode, fixed_pwd=None, fixed_price=None):
+    user = update.message.from_user
+    active_pwds = get_active_passwords()
+
+    if not active_pwds:
+        await update.message.reply_text("❌ Mohon maaf, setoran sedang ditutup (Overload).", reply_markup=back_keyboard())
+        return
+
+    valid_deposits = []
+    invalid_lines = []
+
+    for line in lines:
+        if ':' in line:
+            parts = line.split(':', 1)
+            g_mail = parts[0].strip().lower()
+            p_ass = parts[1].strip()
+
+            if not g_mail.endswith('@gmail.com'):
+                invalid_lines.append(f"`{line}` (Bukan domain @gmail.com)")
+                continue
+
+            if mode == 'BULKING_INPUT_EMAILS':
+                p_ass = fixed_pwd
+                pr_val = fixed_price
+            else:
+                if p_ass not in active_pwds:
+                    invalid_lines.append(f"`{line}` (Password tidak aktif/salah)")
+                    continue
+                pr_val = active_pwds[p_ass]
+
+            valid_deposits.append((g_mail, p_ass, pr_val))
+        else:
+            g_mail = line.strip().lower()
+            if mode == 'BULKING_INPUT_EMAILS':
+                if not g_mail.endswith('@gmail.com'):
+                    invalid_lines.append(f"`{line}` (Bukan domain @gmail.com)")
+                    continue
+                valid_deposits.append((g_mail, fixed_pwd, fixed_price))
+            else:
+                invalid_lines.append(f"`{line}` (Format salah, wajib email:password)")
+
+    if not valid_deposits and invalid_lines:
+        pesan_err = "❌ *SETORAN GAGAL PROSES*\n═══════════════════════\nData yang Anda kirimkan tidak valid:\n\n" + "\n".join(invalid_lines[:10])
+        await update.message.reply_text(pesan_err, reply_markup=cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    if len(valid_deposits) > MAX_BULK_LIMIT:
+        await update.message.reply_text(f"⚠️ Maksimal penyetoran adalah *{MAX_BULK_LIMIT} akun* dalam satu kali kirim.", reply_markup=cancel_keyboard(), parse_mode='Markdown')
+        return
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    saved_count = 0
+    duplicate_count = 0
+    wib_now = get_wib_time()
+
+    for g_mail, p_ass, pr_val in valid_deposits:
+        try:
+            cursor.execute('''
+                INSERT INTO deposits (user_id, gmail, password, status, created_at, price)
+                VALUES (%s, %s, %s, 'PENDING', %s, %s)
+            ''', (user.id, g_mail, p_ass, wib_now, pr_val))
+            conn.commit()
+            saved_count += 1
+        except psycopg2.IntegrityError:
+            conn.rollback()
+            duplicate_count += 1
+        except Exception:
+            conn.rollback()
+
+    cursor.close()
+    conn.close()
+
+    context.user_data.clear()
+
+    pesan_sukses = (
+        f"🎉 *SETORAN AKUN BERHASIL DITERIMA!*\n"
+        f"═══════════════════════\n"
+        f"✅ *Berhasil Disimpan:* `{saved_count}` Akun\n"
+        f"⚠️ *Duplikat / Pernah Ada:* `{duplicate_count}` Akun\n"
+        f"❌ *Gagal / Format Salah:* `{len(invalid_lines)}` Line\n"
+        f"═══════════════════════\n"
+        f"🕒 Status saat ini *PENDING*. Admin akan segera mengecek akun Anda."
+    )
+    await update.message.reply_text(pesan_sukses, reply_markup=back_keyboard(), parse_mode='Markdown')
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     current_mode = context.user_data.get('mode')
@@ -1779,6 +1871,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_lines = cleaned_text.split('\n')
     lines = [line.strip() for line in raw_lines if line.strip()]
 
+    # --- HANDLER MODES USER SETORAN ---
+    if current_mode in ['SATUAN', 'BULKING_INPUT_EMAILS']:
+        fixed_pwd = context.user_data.get('bulk_password')
+        fixed_price = context.user_data.get('bulk_price')
+        await process_user_deposit_input(update, context, lines, current_mode, fixed_pwd, fixed_price)
+        return
+
     # --- PROSES SIMPAN DESKRIPSI WELCOME/START BARU ---
     if current_mode == 'WAITING_WELCOME_TEXT':
         if user.id != ADMIN_CHAT_ID:
@@ -1879,7 +1978,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db()
         cursor = conn.cursor()
 
-        # FIXED: Menjangkau akun berstatus PENDING & PROCESSING
         placeholders = ','.join(['%s'] * len(emails_to_process))
         query_sql = f"SELECT id, user_id, gmail FROM deposits WHERE status IN ('PENDING', 'PROCESSING') AND LOWER(TRIM(gmail)) IN ({placeholders})"
         cursor.execute(query_sql, tuple(emails_to_process))
@@ -1966,7 +2064,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db()
         cursor = conn.cursor()
 
-        # FIXED: Menjangkau akun berstatus PENDING & PROCESSING
         placeholders = ','.join(['%s'] * len(emails_to_approve))
         query_sql = f"SELECT id, user_id, price, gmail FROM deposits WHERE status IN ('PENDING', 'PROCESSING') AND LOWER(TRIM(gmail)) IN ({placeholders})"
         cursor.execute(query_sql, tuple(emails_to_approve))
@@ -2064,7 +2161,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db()
         cursor = conn.cursor()
 
-        # FIXED: Menjangkau akun berstatus PENDING & PROCESSING
         placeholders = ','.join(['%s'] * len(emails_to_reject))
         query_sql = f"SELECT id, user_id, gmail FROM deposits WHERE status IN ('PENDING', 'PROCESSING') AND LOWER(TRIM(gmail)) IN ({placeholders})"
         cursor.execute(query_sql, tuple(emails_to_reject))
@@ -2219,191 +2315,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🏦 *Metode:* {metode}\n"
                 f"📌 *No Rek/HP:* `{rekening}`\n"
                 f"👤 *A/N:* `{atas_nama}`\n"
-                f"🕒 *Waktu:* `{wib_time}`"
+                f"🕒 *Waktu:* `{wib_time}`\n"
+                f"═══════════════════════\n"
+                f"Silakan buka Panel Admin -> Kelola Withdraw Pending untuk memproses."
             )
-            keyboard_admin = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(f"✅ Approve #WD{wd_id}", callback_data=f"accwd_{wd_id}"),
-                    InlineKeyboardButton(f"❌ Reject #WD{wd_id}", callback_data=f"rejwd_{wd_id}")
-                ]
-            ])
-            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=pesan_admin, reply_markup=keyboard_admin, parse_mode='Markdown')
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=pesan_admin, parse_mode='Markdown')
         except Exception:
             pass
         return
 
-    # --- PROSES INPUT SETORAN SATUAN ---
-    if current_mode == 'SATUAN':
-        active_pwds = get_active_passwords()
-        if not active_pwds:
-            await update.message.reply_text("❌ Mohon maaf, setoran sedang ditutup (Overload).", reply_markup=back_keyboard())
-            return
-
-        valid_entries = []
-        invalid_entries = []
-
-        for line in lines:
-            if ':' in line:
-                parts = line.split(':', 1)
-                g_mail = parts[0].strip().lower()
-                p_ass = parts[1].strip()
-
-                if '@gmail.com' in g_mail:
-                    valid_entries.append((g_mail, p_ass))
-                else:
-                    invalid_entries.append(line)
-            else:
-                invalid_entries.append(line)
-
-        if not valid_entries:
-            await update.message.reply_text(
-                "❌ Format tidak valid!\n\nGunakan format: `email@gmail.com:password`",
-                reply_markup=cancel_keyboard(),
-                parse_mode='Markdown'
-            )
-            return
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        saved_count = 0
-        duplicate_count = 0
-        wrong_pwd_count = 0
-
-        wib_time = get_wib_time()
-
-        for g_mail, p_ass in valid_entries:
-            if p_ass not in active_pwds:
-                wrong_pwd_count += 1
-                continue
-
-            item_price = active_pwds[p_ass]
-            try:
-                cursor.execute(
-                    'INSERT INTO deposits (user_id, gmail, password, status, created_at, price) VALUES (%s, %s, %s, %s, %s, %s)',
-                    (user.id, g_mail, p_ass, 'PENDING', wib_time, item_price)
-                )
-                saved_count += 1
-            except psycopg2.IntegrityError:
-                conn.rollback()
-                duplicate_count += 1
-            except Exception:
-                conn.rollback()
-
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-        context.user_data.clear()
-
-        pesan = (
-            f"📥 *HASIL PROSES SETORAN SATUAN*\n"
-            f"═══════════════════════\n"
-            f"✅ *Berhasil Tersimpan:* {saved_count} Akun\n"
-            f"⚠️ *Duplikat (Pernah Ada):* {duplicate_count} Akun\n"
-            f"❌ *Password Nonaktif/Salah:* {wrong_pwd_count} Akun\n"
-            f"═══════════════════════\n"
-            f"Status akun kamu sekarang *PENDING* (menunggu rekap/pengecekan admin)."
-        )
-        await update.message.reply_text(pesan, reply_markup=main_menu_keyboard(user.id), parse_mode='Markdown')
-        return
-
-    # --- PROSES INPUT SETORAN BULKING ---
-    if current_mode == 'BULKING_INPUT_EMAILS':
-        chosen_password = context.user_data.get('bulk_password')
-        pwd_price = context.user_data.get('bulk_price', 4000)
-
-        active_pwds = get_active_passwords()
-        if not chosen_password or chosen_password not in active_pwds:
-            await update.message.reply_text("❌ Sandi yang dipilih tidak lagi aktif. Silakan ulangi proses bulking.", reply_markup=back_keyboard())
-            return
-
-        emails_to_add = []
-        for line in lines:
-            if ':' in line:
-                part_email = line.split(':')[0].strip().lower()
-                if '@gmail.com' in part_email:
-                    emails_to_add.append(part_email)
-            elif '@gmail.com' in line.lower():
-                emails_to_add.append(line.strip().lower())
-
-        if not emails_to_add:
-            await update.message.reply_text(
-                "❌ Tidak ditemukan alamat `@gmail.com` yang valid pada baris input kamu.",
-                reply_markup=cancel_keyboard(),
-                parse_mode='Markdown'
-            )
-            return
-
-        if len(emails_to_add) > MAX_BULK_LIMIT:
-            await update.message.reply_text(
-                f"⚠️ *JUMLAH AKUN MELEBIHI BATAS!*\n\n"
-                f"Kamu mengirim *{len(emails_to_add)} akun*. Batas maksimal bulking adalah *{MAX_BULK_LIMIT} akun* per sekali setor.\n"
-                f"Silakan kurangi daftar akun kamu dan coba lagi.",
-                reply_markup=cancel_keyboard(),
-                parse_mode='Markdown'
-            )
-            return
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        saved_count = 0
-        duplicate_count = 0
-        wib_time = get_wib_time()
-
-        for g_mail in emails_to_add:
-            try:
-                cursor.execute(
-                    'INSERT INTO deposits (user_id, gmail, password, status, created_at, price) VALUES (%s, %s, %s, %s, %s, %s)',
-                    (user.id, g_mail, chosen_password, 'PENDING', wib_time, pwd_price)
-                )
-                saved_count += 1
-            except psycopg2.IntegrityError:
-                conn.rollback()
-                duplicate_count += 1
-            except Exception:
-                conn.rollback()
-
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-        context.user_data.clear()
-
-        pesan = (
-            f"📦 *HASIL PROSES SETORAN BULKING*\n"
-            f"═══════════════════════\n"
-            f"🔑 *Password Dipakai:* `{chosen_password}`\n"
-            f"💵 *Harga Per Akun:* Rp {pwd_price:,}\n"
-            f"═══════════════════════\n"
-            f"✅ *Berhasil Tersimpan:* {saved_count} Akun\n"
-            f"⚠️ *Duplikat (Pernah Ada):* {duplicate_count} Akun\n"
-            f"═══════════════════════\n"
-            f"Status akun kamu sekarang *PENDING* (menunggu rekap/pengecekan admin)."
-        )
-        await update.message.reply_text(pesan, reply_markup=main_menu_keyboard(user.id), parse_mode='Markdown')
-        return
-
-    # Fallback jika tidak ada perintah/mode aktif
-    await update.message.reply_text(get_welcome_text(user.first_name), reply_markup=main_menu_keyboard(user.id), parse_mode='Markdown')
-
-async def post_init(application: ApplicationBuilder):
-    init_db()
-    commands = [
-        BotCommand("start", "Tampilkan Menu Utama / Refresh")
-    ]
-    await application.bot.set_my_commands(commands)
-
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    init_db()
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT | filters.Document.MimeType("text/plain"), handle_message))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT | filters.Document.MimeType("text/plain"), handle_message))
 
-    print("Bot Setoran Gmail V30 Aktif & Berjalan...")
-    app.run_polling()
+    print("Bot Telegram Setoran Gmail berhasil dijalankan...")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
